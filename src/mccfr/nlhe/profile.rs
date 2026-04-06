@@ -36,6 +36,50 @@ impl NlheProfile {
             ..Self::default()
         }
     }
+
+    pub fn rows_profile(
+        self,
+    ) -> impl Iterator<Item = (i64, i16, i64, i16, i16, i16, i64, f32, f32)> {
+        self.encounters.into_iter().flat_map(|(info, edges)| {
+            let history = i64::from(*info.history());
+            let present = i16::from(*info.present());
+            let choices = i64::from(*info.choices());
+            let context = *info.context();
+            let seat_count = context.seat_count() as i16;
+            let seat_position = context.seat_position() as i16;
+            let active_players = context.active_players() as i16;
+            edges
+                .into_iter()
+                .map(move |(e, (p, r))| (u64::from(e) as i64, p, r))
+                .map(move |(e, p, r)| {
+                    (
+                        history,
+                        present,
+                        choices,
+                        seat_count,
+                        seat_position,
+                        active_players,
+                        e,
+                        p,
+                        r,
+                    )
+                })
+        })
+    }
+
+    pub fn profile_columns() -> [tokio_postgres::types::Type; 9] {
+        [
+            tokio_postgres::types::Type::INT8,
+            tokio_postgres::types::Type::INT2,
+            tokio_postgres::types::Type::INT8,
+            tokio_postgres::types::Type::INT2,
+            tokio_postgres::types::Type::INT2,
+            tokio_postgres::types::Type::INT2,
+            tokio_postgres::types::Type::INT8,
+            tokio_postgres::types::Type::FLOAT4,
+            tokio_postgres::types::Type::FLOAT4,
+        ]
+    }
 }
 
 impl Profile for NlheProfile {
@@ -152,51 +196,7 @@ impl crate::save::Schema for NlheProfile {
 #[async_trait::async_trait]
 impl crate::save::Hydrate for NlheProfile {
     async fn hydrate(client: std::sync::Arc<tokio_postgres::Client>) -> Self {
-        log::info!("loading blueprint from database");
-        // grab current epoch from metadata
-        const EPOCH_SQL: &str = const_format::concatcp!(
-            "SELECT value FROM ",
-            crate::save::EPOCH,
-            " WHERE key = 'current'"
-        );
-        let iterations = client
-            .query_opt(EPOCH_SQL, &[])
-            .await
-            .ok()
-            .flatten()
-            .map(|r| r.get::<_, i64>(0) as usize)
-            .expect("to have already created epoch metadata");
-        // iterate over rows
-        const BLUEPRINT_SQL: &str = const_format::concatcp!(
-            "SELECT past, present, future, edge, policy, regret FROM ",
-            crate::save::BLUEPRINT
-        );
-        let mut encounters = BTreeMap::new();
-        for row in client
-            .query(BLUEPRINT_SQL, &[])
-            .await
-            .expect("to have already created blueprint")
-        {
-            let history = Path::from(row.get::<_, i64>(0) as u64);
-            let present = Abstraction::from(row.get::<_, i16>(1));
-            let choices = Path::from(row.get::<_, i64>(2) as u64);
-            let edge = Edge::from(row.get::<_, i64>(3) as u64);
-            let policy = row.get::<_, f32>(4);
-            let regret = row.get::<_, f32>(5);
-            let bucket = Info::from((history, present, choices));
-            encounters
-                .entry(bucket)
-                .or_insert_with(BTreeMap::default)
-                .entry(edge)
-                .or_insert((policy, regret));
-        }
-        log::info!("loaded {} infos from database", encounters.len());
-        Self {
-            iterations,
-            encounters,
-            metrics: Metrics::default(),
-            player_count: 2, // Default to heads-up for database hydration
-        }
+        Self::hydrate_profile(client, &crate::save::TrainingTables::default_hu(), 2).await
     }
 }
 
@@ -212,6 +212,105 @@ impl NlheProfile {
                 .map(move |(e, (p, r))| (u64::from(e) as i64, p, r))
                 .map(move |(e, p, r)| (history, present, choices, e, p, r))
         })
+    }
+
+    pub async fn hydrate_profile(
+        client: std::sync::Arc<tokio_postgres::Client>,
+        tables: &crate::save::TrainingTables,
+        player_count: usize,
+    ) -> Self {
+        log::info!("loading blueprint from database");
+        let epoch = if tables.profile.is_default_hu() {
+            crate::save::EPOCH.to_string()
+        } else {
+            tables.profile.epoch()
+        };
+        let blueprint = if tables.profile.is_default_hu() {
+            crate::save::BLUEPRINT.to_string()
+        } else {
+            tables.profile.blueprint()
+        };
+        let epoch_sql = format!("SELECT value FROM {epoch} WHERE key = 'current'");
+        let iterations = client
+            .query_opt(&epoch_sql, &[])
+            .await
+            .ok()
+            .flatten()
+            .map(|row| row.get::<_, i64>(0) as usize)
+            .expect("to have already created epoch metadata");
+        let query = if tables.profile.is_default_hu() {
+            format!("SELECT past, present, future, edge, policy, regret FROM {blueprint}")
+        } else {
+            format!(
+                "SELECT past, present, future, seat_count, seat_position, active_players, edge, policy, regret FROM {blueprint}"
+            )
+        };
+        let mut encounters = BTreeMap::new();
+        for row in client
+            .query(&query, &[])
+            .await
+            .expect("to have already created blueprint")
+        {
+            let history = Path::from(row.get::<_, i64>(0) as u64);
+            let present = Abstraction::from(row.get::<_, i16>(1));
+            let choices = Path::from(row.get::<_, i64>(2) as u64);
+            let (context, edge_idx, policy_idx, regret_idx) = if tables.profile.is_default_hu() {
+                (InfoContext::heads_up(), 3, 4, 5)
+            } else {
+                (
+                    InfoContext::from((
+                        row.get::<_, i16>(3) as u8,
+                        row.get::<_, i16>(4) as u8,
+                        row.get::<_, i16>(5) as u8,
+                    )),
+                    6,
+                    7,
+                    8,
+                )
+            };
+            let edge = Edge::from(row.get::<_, i64>(edge_idx) as u64);
+            let policy = row.get::<_, f32>(policy_idx);
+            let regret = row.get::<_, f32>(regret_idx);
+            let bucket = Info::from((history, present, choices, context));
+            encounters
+                .entry(bucket)
+                .or_insert_with(BTreeMap::default)
+                .entry(edge)
+                .or_insert((policy, regret));
+        }
+        log::info!("loaded {} infos from database", encounters.len());
+        Self {
+            iterations,
+            encounters,
+            metrics: Metrics::default(),
+            player_count,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_profile_emits_infoset_context() {
+        let info = Info::from((
+            Path::default(),
+            Abstraction::from(7_i16),
+            Path::from(vec![Edge::Check, Edge::Call]),
+            InfoContext::from((6, 2, 4)),
+        ));
+        let mut profile = NlheProfile::for_players(6);
+        let mut memory = BTreeMap::new();
+        memory.insert(Edge::Check, (0.6, 1.5));
+        profile.encounters.insert(info, memory);
+
+        let rows = profile.rows_profile().collect::<Vec<_>>();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].3, 6);
+        assert_eq!(rows[0].4, 2);
+        assert_eq!(rows[0].5, 4);
     }
 }
 

@@ -13,14 +13,20 @@ pub struct FastSession {
     client: Arc<Client>,
     solver: NlheSolver,
     tables: crate::save::TrainingTables,
+    player_count: usize,
 }
 
 impl FastSession {
-    pub async fn new(client: Arc<Client>) -> Self {
+    pub async fn new(
+        client: Arc<Client>,
+        tables: crate::save::TrainingTables,
+        player_count: usize,
+    ) -> Self {
         Self {
-            solver: NlheSolver::hydrate(client.clone()).await,
+            solver: NlheSolver::hydrate_profile(client.clone(), &tables, player_count).await,
             client,
-            tables: crate::save::TrainingTables::default_hu(),
+            tables,
+            player_count,
         }
     }
 }
@@ -34,7 +40,7 @@ impl Trainer for FastSession {
         &self.tables
     }
     fn player_count(&self) -> usize {
-        2
+        self.player_count
     }
 
     async fn step(&mut self) {
@@ -62,22 +68,39 @@ impl Trainer for FastSession {
         let client = self.client;
         let epochs = self.solver.profile.epochs();
         let profile = self.solver.profile;
-        client.stage().await;
-        let copy = format!(
-            "COPY {t} (past, present, future, edge, policy, regret) FROM STDIN BINARY",
-            t = crate::save::STAGING
-        );
-        let writer = BinaryCopyInWriter::new(
-            client.copy_in(&copy).await.expect("copy_in"),
-            NlheProfile::columns(),
-        );
+        client.stage_profile(&self.tables.profile).await;
+        let (copy, columns) = if self.tables.profile.is_default_hu() {
+            (
+                format!(
+                    "COPY {t} (past, present, future, edge, policy, regret) FROM STDIN BINARY",
+                    t = crate::save::STAGING
+                ),
+                NlheProfile::columns().to_vec(),
+            )
+        } else {
+            (
+                format!(
+                    "COPY {t} (past, present, future, seat_count, seat_position, active_players, edge, policy, regret) FROM STDIN BINARY",
+                    t = self.tables.profile.staging()
+                ),
+                NlheProfile::profile_columns().to_vec(),
+            )
+        };
+        let writer =
+            BinaryCopyInWriter::new(client.copy_in(&copy).await.expect("copy_in"), &columns);
         futures::pin_mut!(writer);
-        for row in profile.rows() {
-            row.write(writer.as_mut()).await;
+        if self.tables.profile.is_default_hu() {
+            for row in profile.rows() {
+                row.write(writer.as_mut()).await;
+            }
+        } else {
+            for row in profile.rows_profile() {
+                row.write(writer.as_mut()).await;
+            }
         }
         writer.finish().await.expect("finish stream");
-        client.merge().await;
-        client.stamp(epochs).await;
+        client.merge_profile(&self.tables.profile).await;
+        client.stamp_profile(&self.tables.profile, epochs).await;
         log::info!("profile sync complete (epoch {})", epochs);
     }
 }

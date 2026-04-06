@@ -2,21 +2,66 @@ use super::*;
 use crate::cards::*;
 use crate::gameplay::*;
 use crate::mccfr::*;
+use crate::save::TrainingTables;
 use std::collections::BTreeMap;
 
 type NlheTree = Tree<Turn, Edge, Game, Info>;
 
 #[derive(Default)]
 pub struct NlheEncoder {
-    lookup: BTreeMap<Isomorphism, Abstraction>,
+    lookup: BTreeMap<(Isomorphism, u8), Abstraction>,
 }
 
 impl NlheEncoder {
-    pub fn abstraction(&self, iso: &Isomorphism) -> Abstraction {
+    pub fn abstraction(&self, iso: &Isomorphism, seat_position: u8) -> Abstraction {
         self.lookup
-            .get(iso)
+            .get(&(*iso, seat_position))
+            .or_else(|| self.lookup.get(&(*iso, 0)))
             .copied()
-            .expect("isomorphsim not found in abstraction loookup")
+            .expect("isomorphism not found in abstraction lookup")
+    }
+
+    pub async fn hydrate_profile(
+        client: std::sync::Arc<tokio_postgres::Client>,
+        tables: &TrainingTables,
+    ) -> Self {
+        log::info!("loading isomorphism lookup from database");
+        let lookup = if tables.abstraction.is_default_v1() {
+            const SQL: &str =
+                const_format::concatcp!("SELECT obs, abs FROM ", crate::save::ISOMORPHISM);
+            client
+                .query(SQL, &[])
+                .await
+                .expect("isomorphism query")
+                .into_iter()
+                .map(|row| {
+                    (
+                        (Isomorphism::from(row.get::<_, i64>(0)), 0),
+                        Abstraction::from(row.get::<_, i16>(1)),
+                    )
+                })
+                .collect()
+        } else {
+            let isomorphism = tables.abstraction.isomorphism();
+            let sql =
+                format!("SELECT obs, abs, seat_position FROM {isomorphism} ORDER BY seat_position");
+            client
+                .query(&sql, &[])
+                .await
+                .expect("isomorphism query")
+                .into_iter()
+                .map(|row| {
+                    (
+                        (
+                            Isomorphism::from(row.get::<_, i64>(0)),
+                            row.get::<_, i16>(2) as u8,
+                        ),
+                        Abstraction::from(row.get::<_, i16>(1)),
+                    )
+                })
+                .collect()
+        };
+        Self { lookup }
     }
     pub fn choices(game: &Game, depth: usize) -> Vec<Edge> {
         Info::futures(game, depth).into_iter().collect()
@@ -139,18 +184,7 @@ impl crate::save::Schema for NlheEncoder {
 #[async_trait::async_trait]
 impl crate::save::Hydrate for NlheEncoder {
     async fn hydrate(client: std::sync::Arc<tokio_postgres::Client>) -> Self {
-        log::info!("loading isomorphism lookup from database");
-        const SQL: &str =
-            const_format::concatcp!("SELECT obs, abs FROM ", crate::save::ISOMORPHISM);
-        let lookup = client
-            .query(SQL, &[])
-            .await
-            .expect("isomorphism query")
-            .into_iter()
-            .map(|row| (row.get::<_, i64>(0), row.get::<_, i16>(1)))
-            .map(|(obs, abs)| (Isomorphism::from(obs), Abstraction::from(abs)))
-            .collect::<BTreeMap<Isomorphism, Abstraction>>();
-        Self { lookup }
+        Self::hydrate_profile(client, &TrainingTables::default_hu()).await
     }
 }
 
@@ -182,9 +216,37 @@ impl crate::save::Disk for NlheEncoder {
                 .map(crate::clustering::Lookup::load)
                 .map(BTreeMap::from)
                 .fold(BTreeMap::default(), |mut map, l| {
-                    map.extend(l);
+                    map.extend(l.into_iter().map(|(iso, abs)| ((iso, 0), abs)));
                     map
                 }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn abstraction_prefers_exact_seat_position() {
+        let game = Game::root_with_config(TableConfig::for_players(6));
+        let iso = Isomorphism::from(game.sweat());
+        let mut lookup = BTreeMap::new();
+        lookup.insert((iso, 0), Abstraction::from(3_i16));
+        lookup.insert((iso, 2), Abstraction::from(9_i16));
+        let encoder = NlheEncoder { lookup };
+
+        assert_eq!(encoder.abstraction(&iso, 2), Abstraction::from(9_i16));
+    }
+
+    #[test]
+    fn abstraction_falls_back_to_seat_zero() {
+        let game = Game::root_with_config(TableConfig::for_players(6));
+        let iso = Isomorphism::from(game.sweat());
+        let mut lookup = BTreeMap::new();
+        lookup.insert((iso, 0), Abstraction::from(5_i16));
+        let encoder = NlheEncoder { lookup };
+
+        assert_eq!(encoder.abstraction(&iso, 4), Abstraction::from(5_i16));
     }
 }

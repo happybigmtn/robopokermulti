@@ -22,14 +22,24 @@ pub struct NlheSolver {
     pub profile: NlheProfile,
 }
 
+impl NlheSolver {
+    pub async fn hydrate_profile(
+        client: std::sync::Arc<tokio_postgres::Client>,
+        tables: &crate::save::TrainingTables,
+        player_count: usize,
+    ) -> Self {
+        Self {
+            sampler: NlheEncoder::hydrate_profile(client.clone(), tables).await,
+            profile: NlheProfile::hydrate_profile(client, tables, player_count).await,
+        }
+    }
+}
+
 #[cfg(feature = "database")]
 #[async_trait::async_trait]
 impl crate::save::Hydrate for NlheSolver {
     async fn hydrate(client: std::sync::Arc<tokio_postgres::Client>) -> Self {
-        Self {
-            sampler: NlheEncoder::hydrate(client.clone()).await,
-            profile: NlheProfile::hydrate(client.clone()).await,
-        }
+        Self::hydrate_profile(client, &crate::save::TrainingTables::default_hu(), 2).await
     }
 }
 

@@ -74,15 +74,10 @@ impl Mode {
                 .await
             }
             Self::Fast => {
-                if settings.tables.profile.is_default_hu()
-                    && settings.tables.abstraction.is_default_v1()
-                    && settings.player_count == 2
-                {
-                    FastSession::new(client).await.train().await
-                } else {
-                    eprintln!("~ trainer error · fast mode only supported for default heads-up");
-                    std::process::exit(1);
-                }
+                FastSession::new(client, settings.tables, settings.player_count)
+                    .await
+                    .train()
+                    .await
             }
             Self::Slow => {
                 SlowSession::new(

@@ -114,7 +114,7 @@ impl Info {
     /// Replaces the seed logic in Encoder
     pub fn from_game(game: &Game, encoder: &NlheEncoder) -> Self {
         let iso = Isomorphism::from(game.sweat());
-        let present = encoder.abstraction(&iso);
+        let present = encoder.abstraction(&iso, game.seat_position() as u8);
         let depth = 0;
         let history = Path::default();
         let choices = Self::futures(game, depth);
@@ -141,7 +141,7 @@ impl Info {
     ) -> Self {
         let (edge, ref game, head) = leaf;
         let iso = Isomorphism::from(game.sweat());
-        let present = encoder.abstraction(&iso);
+        let present = encoder.abstraction(&iso, game.seat_position() as u8);
         let history = std::iter::once(edge)
             .chain(tree.at(head).map(|(_, e)| e))
             .take(crate::MAX_DEPTH_SUBGAME)

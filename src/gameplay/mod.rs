@@ -13,8 +13,6 @@ mod showdown;
 mod table;
 mod tournament;
 mod turn;
-#[cfg(test)]
-mod multiway;
 
 pub use abstraction::*;
 pub use action::*;

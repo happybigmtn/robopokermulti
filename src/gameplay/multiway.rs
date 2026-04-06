@@ -6,6 +6,10 @@
 //! - Explicit posting phase (antes + blinds)
 //! - Proper action order for N players (last_aggressor, acted_this_street)
 //! - Short-stack blind handling (partial blinds, forced all-in)
+//!
+//! `Game` in `game.rs` is the canonical engine surface for the main training and
+//! runtime stack. `MultiwayGame` remains here only as a temporary reference
+//! implementation while the fork converges on one engine path.
 
 use super::*;
 use crate::Chips;

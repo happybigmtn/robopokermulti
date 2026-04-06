@@ -842,7 +842,8 @@ mod tests {
     /// Recall::reset() preserves config and uses config-aware posting
     #[test]
     fn reset_preserves_config() {
-        // Use HU config since multiway Game isn't supported yet
+        // Keep this reset assertion narrow for now. Multiway reset coverage needs
+        // a separate pass once the gameplay engine is fully unified.
         let config = TableConfig::heads_up().with_ante(1).with_stack(200);
         let r = Recall::with_config(config);
 

@@ -19,7 +19,7 @@ pub use action::*;
 pub use arrangement::*;
 pub use edge::*;
 pub use game::*;
-pub use multiway::*;
+pub use multiway::{Occupancy, PostingPhase, TableConfig};
 pub use odds::*;
 pub use path::*;
 pub use pnl::*;

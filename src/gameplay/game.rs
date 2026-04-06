@@ -997,6 +997,184 @@ mod tests {
     }
 
     #[test]
+    fn root_three_handed_positions_and_pot() {
+        let config = TableConfig::for_players(3);
+        let game = Game::root_with_config(config);
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+        assert_eq!(game.actor_idx(), 0);
+        assert_eq!(game.pot(), config.small_blind + config.big_blind);
+        assert_eq!(game.seats[1].stake(), config.small_blind);
+        assert_eq!(game.seats[2].stake(), config.big_blind);
+    }
+
+    #[test]
+    fn root_six_handed_positions_and_action_order() {
+        let config = TableConfig::for_players(6);
+        let game = Game::root_with_config(config);
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+        assert_eq!(game.actor_idx(), 3);
+        assert_eq!(game.pot(), config.small_blind + config.big_blind);
+    }
+
+    #[test]
+    fn root_with_ante_collects_before_blinds() {
+        let config = TableConfig::for_players(3).with_ante(1);
+        let game = Game::root_with_config(config);
+
+        let expected = 3 * config.ante + config.small_blind + config.big_blind;
+        assert_eq!(game.pot(), expected);
+        assert_eq!(game.actor_idx(), 0);
+    }
+
+    #[test]
+    fn heads_up_uses_button_as_small_blind() {
+        let game = Game::root_with_config(TableConfig::heads_up());
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 0);
+        assert_eq!(game.bb_seat(), 1);
+        assert_eq!(game.actor_idx(), 0);
+    }
+
+    #[test]
+    fn compute_blind_seats_skips_empty_seats() {
+        let mut occupancy = [Occupancy::Empty; N];
+        occupancy[0] = Occupancy::Active;
+        occupancy[1] = Occupancy::Active;
+        occupancy[3] = Occupancy::Active;
+
+        let (sb, bb) = Game::compute_blind_seats(4, 0, &occupancy);
+        assert_eq!((sb, bb), (1, 3));
+    }
+
+    #[test]
+    fn move_button_rotates_through_occupied_seats() {
+        let mut game = Game::root_with_config(TableConfig::for_players(3));
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+
+        game.move_button();
+        assert_eq!(game.button(), 1);
+        assert_eq!(game.sb_seat(), 2);
+        assert_eq!(game.bb_seat(), 0);
+
+        game.move_button();
+        assert_eq!(game.button(), 2);
+        assert_eq!(game.sb_seat(), 0);
+        assert_eq!(game.bb_seat(), 1);
+
+        game.move_button();
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+    }
+
+    #[test]
+    fn move_button_skips_empty_seats() {
+        let mut game = Game::root_with_config(TableConfig::for_players(4));
+        game.occupancy[2] = Occupancy::Empty;
+
+        assert_eq!(game.button(), 0);
+
+        game.move_button();
+        assert_eq!(game.button(), 1);
+
+        game.move_button();
+        assert_eq!(game.button(), 3);
+
+        game.move_button();
+        assert_eq!(game.button(), 0);
+    }
+
+    #[test]
+    fn short_stack_small_blind_posts_partial_and_shoves() {
+        let config = TableConfig::for_players(3).with_blinds(2, 4);
+        let mut game = Game::with_stacks(
+            config,
+            &[config.starting_stack, config.small_blind - 1, config.starting_stack],
+        );
+
+        game.complete_posting();
+
+        assert_eq!(game.seats[1].state(), State::Shoving);
+        assert_eq!(game.seats[1].stack(), 0);
+        assert_eq!(game.seats[1].stake(), config.small_blind - 1);
+    }
+
+    #[test]
+    fn short_stack_big_blind_posts_partial_and_shoves() {
+        let config = TableConfig::for_players(3);
+        let mut game = Game::with_stacks(config, &[config.starting_stack, config.starting_stack, 1]);
+
+        game.complete_posting();
+
+        assert_eq!(game.seats[2].state(), State::Shoving);
+        assert_eq!(game.seats[2].stack(), 0);
+        assert_eq!(game.seats[2].stake(), 1);
+    }
+
+    #[test]
+    fn postflop_action_starts_left_of_button() {
+        let config = TableConfig::for_players(3);
+        let mut game = Game::root_with_config(config);
+
+        game = game.apply(Action::Call(game.to_call()));
+        game = game.apply(Action::Call(game.to_call()));
+        game = game.apply(Action::Check);
+
+        assert_eq!(game.turn(), Turn::Chance);
+        let Action::Draw(flop) = game.reveal() else {
+            panic!("expected flop reveal");
+        };
+        game = game.apply(Action::Draw(flop));
+
+        assert_eq!(game.actor_idx(), 1);
+    }
+
+    #[test]
+    fn betting_round_ends_after_aggressor_is_called() {
+        let mut game = Game::root_with_config(TableConfig::for_players(3));
+
+        game = game.apply(Action::Raise(game.to_raise()));
+        assert_eq!(game.actor_idx(), 1);
+        assert!(!game.is_betting_round_complete());
+
+        game = game.apply(Action::Call(game.to_call()));
+        assert_eq!(game.actor_idx(), 2);
+        assert!(!game.is_betting_round_complete());
+
+        game = game.apply(Action::Call(game.to_call()));
+        assert!(game.is_betting_round_complete());
+    }
+
+    #[test]
+    fn betting_round_reopens_after_reraise() {
+        let mut game = Game::root_with_config(TableConfig::for_players(3).with_stack(100));
+
+        game = game.apply(Action::Raise(game.to_raise()));
+        assert_eq!(game.last_aggressor, Some(0));
+
+        game = game.apply(Action::Raise(game.to_raise()));
+        assert_eq!(game.last_aggressor, Some(1));
+        assert!(!game.is_betting_round_complete());
+
+        game = game.apply(Action::Fold);
+        assert_eq!(game.actor_idx(), 0);
+        assert!(!game.is_betting_round_complete());
+
+        game = game.apply(Action::Call(game.to_call()));
+        assert!(game.is_betting_round_complete());
+    }
+
+    #[test]
     fn next_removes_busted_and_keeps_short_stack() {
         let config = TableConfig::for_players(3);
         let mut game = Game::root_with_config(config);

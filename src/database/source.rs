@@ -208,18 +208,17 @@ impl Source for Arc<Client> {
     }
 }
 
-fn env_truthy(key: &str) -> bool {
-    matches!(
-        std::env::var(key)
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v)
-            if v == "1" || v == "true" || v == "yes" || v == "on" || v == "y"
-    )
-}
-
-fn position_aware_enabled() -> bool {
-    env_truthy("POSITION_AWARE")
+fn encode_profile_sql(tables: &AbstractionTables) -> String {
+    let isomorphism = if tables.is_default_v1() {
+        ISOMORPHISM.to_string()
+    } else {
+        tables.isomorphism()
+    };
+    if tables.is_default_v1() {
+        format!("SELECT abs FROM {isomorphism} WHERE obs = $1")
+    } else {
+        format!("SELECT abs FROM {isomorphism} WHERE obs = $1 AND seat_position = $2")
+    }
 }
 
 /// Profile-aware read operations for multiway training.
@@ -255,21 +254,14 @@ impl ProfileSource for Client {
         iso: Isomorphism,
         seat_position: u8,
     ) -> Abstraction {
-        let isomorphism = if tables.is_default_v1() {
-            ISOMORPHISM.to_string()
-        } else {
-            tables.isomorphism()
-        };
-        if tables.is_default_v1() || !position_aware_enabled() {
-            let sql = format!("SELECT abs FROM {isomorphism} WHERE obs = $1");
+        let sql = encode_profile_sql(tables);
+        if tables.is_default_v1() {
             self.query_one(&sql, &[&i64::from(iso)])
                 .await
                 .expect("isomorphism lookup")
                 .get::<_, i16>(0)
                 .into()
         } else {
-            let sql =
-                format!("SELECT abs FROM {isomorphism} WHERE obs = $1 AND seat_position = $2");
             self.query_one(&sql, &[&i64::from(iso), &(seat_position as i16)])
                 .await
                 .expect("isomorphism lookup")
@@ -469,5 +461,26 @@ impl ProfileSource for Arc<Client> {
     }
     async fn histogram_profile(&self, tables: &AbstractionTables, abs: Abstraction) -> Histogram {
         self.as_ref().histogram_profile(tables, abs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_profile_sql;
+    use crate::save::AbstractionTables;
+
+    #[test]
+    fn default_abstraction_lookup_uses_obs_only_query() {
+        let sql = encode_profile_sql(&AbstractionTables::default_v1());
+        assert_eq!(sql, "SELECT abs FROM isomorphism WHERE obs = $1");
+    }
+
+    #[test]
+    fn versioned_abstraction_lookup_requires_seat_position() {
+        let sql = encode_profile_sql(&AbstractionTables::new("abs_v2_p6"));
+        assert_eq!(
+            sql,
+            "SELECT abs FROM isomorphism_abs_v2_p6 WHERE obs = $1 AND seat_position = $2"
+        );
     }
 }

@@ -59,24 +59,11 @@ impl Lookup {
     }
 }
 
-fn env_truthy(key: &str) -> bool {
-    matches!(
-        std::env::var(key)
-            .ok()
-            .map(|v| v.trim().to_ascii_lowercase()),
-        Some(ref v)
-            if v == "1" || v == "true" || v == "yes" || v == "on" || v == "y"
-    )
-}
-
-fn position_aware_seat_count() -> Option<u8> {
-    if !env_truthy("POSITION_AWARE") {
-        return None;
-    }
+fn versioned_seat_count() -> u8 {
     if let Ok(value) = std::env::var("POSITION_AWARE_SEATS") {
         if let Ok(count) = value.parse::<u8>() {
             if count >= 2 {
-                return Some(count);
+                return count;
             }
         }
     }
@@ -84,6 +71,7 @@ fn position_aware_seat_count() -> Option<u8> {
         .ok()
         .and_then(|v| v.parse::<u8>().ok())
         .filter(|v| *v >= 2)
+        .expect("versioned abstraction tables require PLAYER_COUNT or POSITION_AWARE_SEATS >= 2")
 }
 
 #[cfg(feature = "database")]
@@ -181,9 +169,9 @@ impl Lookup {
         let seat_count = if tables.is_default_v1() {
             None
         } else {
-            position_aware_seat_count()
+            Some(versioned_seat_count())
         };
-        let position_aware = seat_count.is_some();
+        let position_aware = !tables.is_default_v1();
         let copy = if position_aware {
             format!("COPY {isomorphism} (obs, abs, seat_position) FROM STDIN BINARY")
         } else {
@@ -280,9 +268,9 @@ impl Lookup {
         let seat_count = if tables.is_default_v1() {
             None
         } else {
-            position_aware_seat_count()
+            Some(versioned_seat_count())
         };
-        let position_aware = seat_count.is_some();
+        let position_aware = !tables.is_default_v1();
         let copy = if position_aware {
             format!("COPY {isomorphism} (obs, abs, seat_position) FROM STDIN BINARY")
         } else {

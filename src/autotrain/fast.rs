@@ -33,6 +33,9 @@ impl Trainer for FastSession {
     fn tables(&self) -> &crate::save::TrainingTables {
         &self.tables
     }
+    fn player_count(&self) -> usize {
+        2
+    }
 
     async fn step(&mut self) {
         self.solver.step();

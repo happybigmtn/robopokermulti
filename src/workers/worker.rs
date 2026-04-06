@@ -135,19 +135,11 @@ impl Worker {
 // encoding operations
 impl Worker {
     async fn encode(&self, game: &Game) -> Abstraction {
-        let seat_index = game.actor_idx();
-        let seat_count = game.n();
-        let button = game.button();
-        let seat_position = if seat_count > 0 {
-            ((seat_index + seat_count - button) % seat_count) as u8
-        } else {
-            seat_index as u8
-        };
         self.client
             .encode_profile(
                 &self.tables.abstraction,
                 Isomorphism::from(game.sweat()),
-                seat_position,
+                game.seat_position() as u8,
             )
             .await
     }
@@ -156,7 +148,8 @@ impl Worker {
         let present = self.encode(game).await;
         let history = Path::default();
         let choices = Info::futures(game, 0);
-        Info::from((history, present, choices))
+        let context = InfoContext::from_game(game);
+        Info::from((history, present, choices, context))
     }
 
     async fn info(&self, tree: &Tree<Turn, Edge, Game, Info>, leaf: Branch<Edge, Game>) -> Info {
@@ -169,7 +162,8 @@ impl Worker {
             .collect::<Path>();
         let choices = Info::futures(game, Info::depth(&history));
         let present = self.encode(game).await;
-        Info::from((history, present, choices))
+        let context = InfoContext::from_game(game);
+        Info::from((history, present, choices, context))
     }
 
     fn branches(&self, node: &Node<Turn, Edge, Game, Info>) -> Vec<Branch<Edge, Game>> {

@@ -10,10 +10,84 @@ use std::hash::Hash;
 /// i guess would just be P::00, but it can't be derived in [Abstraction]
 /// because of the Middle bit hashing we do in [Abstraction]
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+pub struct InfoContext {
+    seat_count: u8,
+    seat_position: u8,
+    active_players: u8,
+}
+
+impl InfoContext {
+    pub const fn heads_up() -> Self {
+        Self {
+            seat_count: 2,
+            seat_position: 0,
+            active_players: 2,
+        }
+    }
+
+    pub fn from_game(game: &Game) -> Self {
+        Self {
+            seat_count: game.n() as u8,
+            seat_position: game.seat_position() as u8,
+            active_players: game.active_player_count() as u8,
+        }
+    }
+
+    pub fn seat_count(&self) -> u8 {
+        self.seat_count
+    }
+
+    pub fn seat_position(&self) -> u8 {
+        self.seat_position
+    }
+
+    pub fn active_players(&self) -> u8 {
+        self.active_players
+    }
+}
+
+impl Default for InfoContext {
+    fn default() -> Self {
+        Self::heads_up()
+    }
+}
+
+impl From<InfoContext> for (u8, u8, u8) {
+    fn from(context: InfoContext) -> Self {
+        (
+            context.seat_count,
+            context.seat_position,
+            context.active_players,
+        )
+    }
+}
+
+impl From<(u8, u8, u8)> for InfoContext {
+    fn from((seat_count, seat_position, active_players): (u8, u8, u8)) -> Self {
+        Self {
+            seat_count,
+            seat_position,
+            active_players,
+        }
+    }
+}
+
+impl std::fmt::Display for InfoContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.seat_count, self.seat_position, self.active_players
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct Info {
     history: Path,
     present: Abstraction,
     choices: Path,
+    context: InfoContext,
 }
 
 impl Info {
@@ -25,6 +99,9 @@ impl Info {
     }
     pub fn choices(&self) -> &Path {
         &self.choices
+    }
+    pub fn context(&self) -> &InfoContext {
+        &self.context
     }
     pub fn edges(&self) -> Vec<Edge> {
         self.choices.into_iter().collect()
@@ -41,16 +118,19 @@ impl Info {
         let depth = 0;
         let history = Path::default();
         let choices = Self::futures(game, depth);
-        Self::from((history, present, choices))
+        let context = InfoContext::from_game(game);
+        Self::from((history, present, choices, context))
     }
     /// Create Info from Recall history with abstraction
     /// Used during inference when only abstraction is available
     pub fn from_path(recall: &Recall, present: Abstraction) -> Self {
+        let game = recall.head();
         // @reversed-history
         let history = recall.path().rev().collect::<Path>();
         let depth = Self::depth(&history);
-        let choices = Self::futures(&recall.head(), depth);
-        Self::from((history, present, choices))
+        let choices = Self::futures(&game, depth);
+        let context = InfoContext::from_game(&game);
+        Self::from((history, present, choices, context))
     }
     /// Create Info from tree traversal
     /// Replaces Encoder::info
@@ -70,7 +150,8 @@ impl Info {
             .collect::<Path>();
         let depth = Self::depth(&history);
         let choices = Self::futures(game, depth);
-        Self::from((history, present, choices))
+        let context = InfoContext::from_game(game);
+        Self::from((history, present, choices, context))
     }
 }
 
@@ -179,10 +260,17 @@ impl TreeInfo for Info {
 
 impl From<(Path, Abstraction, Path)> for Info {
     fn from((history, present, futures): (Path, Abstraction, Path)) -> Self {
+        Self::from((history, present, futures, InfoContext::heads_up()))
+    }
+}
+
+impl From<(Path, Abstraction, Path, InfoContext)> for Info {
+    fn from((history, present, futures, context): (Path, Abstraction, Path, InfoContext)) -> Self {
         Self {
             history,
             present,
             choices: futures,
+            context,
         }
     }
 }
@@ -192,15 +280,30 @@ impl From<Info> for (Path, Abstraction, Path) {
     }
 }
 
+impl From<Info> for (Path, Abstraction, Path, InfoContext) {
+    fn from(info: Info) -> Self {
+        (info.history, info.present, info.choices, info.context)
+    }
+}
+
 impl std::fmt::Display for Info {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}>>{}<<{}", self.history, self.present, self.choices)
+        write!(
+            f,
+            "{}@{}>>{}<<{}",
+            self.history, self.context, self.present, self.choices
+        )
     }
 }
 
 impl Arbitrary for Info {
     fn random() -> Self {
-        Self::from((Path::random(), Abstraction::random(), Path::random()))
+        Self::from((
+            Path::random(),
+            Abstraction::random(),
+            Path::random(),
+            InfoContext::from((rand::random(), rand::random(), rand::random())),
+        ))
     }
 }
 
@@ -321,12 +424,27 @@ mod tests {
     #[test]
     fn roundtrip_string_serialization() {
         let info = Info::random();
-        let (history, present, choices) = info.into();
+        let (history, present, choices, context) = info.into();
         let history_i64: i64 = history.into();
         let present_i64: i64 = present.into();
         let choices_i64: i64 = choices.into();
-        let deserialized = Info::from((history_i64.into(), present_i64.into(), choices_i64.into()));
+        let deserialized = Info::from((
+            history_i64.into(),
+            present_i64.into(),
+            choices_i64.into(),
+            context,
+        ));
         assert_eq!(info, deserialized);
+    }
+
+    #[test]
+    fn context_tracks_multiway_runtime_state() {
+        let game = Game::root_with_config(TableConfig::for_players(6));
+        let context = InfoContext::from_game(&game);
+
+        assert_eq!(context.seat_count(), 6);
+        assert_eq!(context.seat_position(), 3);
+        assert_eq!(context.active_players(), 6);
     }
 
     #[test]

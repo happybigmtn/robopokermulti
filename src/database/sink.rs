@@ -84,26 +84,52 @@ impl ProfileSink for Client {
         } else {
             tables.blueprint()
         };
-        let sql = format!(
-            "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (past, present, future, edge) \
-             DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
-        );
         for record in records {
-            self.execute(
-                &sql,
-                &[
-                    &i64::from(*record.info.history()),
-                    &i16::from(*record.info.present()),
-                    &i64::from(*record.info.choices()),
-                    &(u64::from(record.edge) as i64),
-                    &record.policy,
-                    &record.regret,
-                ],
-            )
-            .await
-            .expect("blueprint upsert");
+            if tables.is_default_hu() {
+                let sql = format!(
+                    "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
+                     VALUES ($1, $2, $3, $4, $5, $6) \
+                     ON CONFLICT (past, present, future, edge) \
+                     DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+                );
+                self.execute(
+                    &sql,
+                    &[
+                        &i64::from(*record.info.history()),
+                        &i16::from(*record.info.present()),
+                        &i64::from(*record.info.choices()),
+                        &(u64::from(record.edge) as i64),
+                        &record.policy,
+                        &record.regret,
+                    ],
+                )
+                .await
+                .expect("blueprint upsert");
+            } else {
+                let sql = format!(
+                    "INSERT INTO {blueprint} \
+                     (past, present, future, seat_count, seat_position, active_players, edge, policy, regret) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                     ON CONFLICT (past, present, future, seat_count, seat_position, active_players, edge) \
+                     DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+                );
+                self.execute(
+                    &sql,
+                    &[
+                        &i64::from(*record.info.history()),
+                        &i16::from(*record.info.present()),
+                        &i64::from(*record.info.choices()),
+                        &(record.info.context().seat_count() as i16),
+                        &(record.info.context().seat_position() as i16),
+                        &(record.info.context().active_players() as i16),
+                        &(u64::from(record.edge) as i64),
+                        &record.policy,
+                        &record.regret,
+                    ],
+                )
+                .await
+                .expect("blueprint upsert");
+            }
         }
     }
 
@@ -141,12 +167,22 @@ pub mod profile_sink_sql {
         } else {
             tables.blueprint()
         };
-        format!(
-            "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (past, present, future, edge) \
-             DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
-        )
+        if tables.is_default_hu() {
+            format!(
+                "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (past, present, future, edge) \
+                 DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+            )
+        } else {
+            format!(
+                "INSERT INTO {blueprint} \
+                 (past, present, future, seat_count, seat_position, active_players, edge, policy, regret) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (past, present, future, seat_count, seat_position, active_players, edge) \
+                 DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+            )
+        }
     }
 
     /// Generate the SQL for advancing the epoch counter for a profile.
@@ -233,6 +269,9 @@ mod tests {
         assert!(sql.contains("past"));
         assert!(sql.contains("present"));
         assert!(sql.contains("future"));
+        assert!(sql.contains("seat_count"));
+        assert!(sql.contains("seat_position"));
+        assert!(sql.contains("active_players"));
         assert!(sql.contains("edge"));
         assert!(sql.contains("policy"));
         assert!(sql.contains("regret"));

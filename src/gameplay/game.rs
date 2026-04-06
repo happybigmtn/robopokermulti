@@ -266,6 +266,17 @@ impl Game {
     pub fn config(&self) -> TableConfig {
         self.config
     }
+
+    pub fn seat_position(&self) -> usize {
+        if self.config.seat_count == 0 {
+            return self.actor;
+        }
+        (self.actor + self.config.seat_count - self.button) % self.config.seat_count
+    }
+
+    pub fn active_player_count(&self) -> usize {
+        self.in_hand_indices().len()
+    }
 }
 
 impl Game {
@@ -1099,7 +1110,11 @@ mod tests {
         let config = TableConfig::for_players(3).with_blinds(2, 4);
         let mut game = Game::with_stacks(
             config,
-            &[config.starting_stack, config.small_blind - 1, config.starting_stack],
+            &[
+                config.starting_stack,
+                config.small_blind - 1,
+                config.starting_stack,
+            ],
         );
 
         game.complete_posting();
@@ -1112,7 +1127,8 @@ mod tests {
     #[test]
     fn short_stack_big_blind_posts_partial_and_shoves() {
         let config = TableConfig::for_players(3);
-        let mut game = Game::with_stacks(config, &[config.starting_stack, config.starting_stack, 1]);
+        let mut game =
+            Game::with_stacks(config, &[config.starting_stack, config.starting_stack, 1]);
 
         game.complete_posting();
 

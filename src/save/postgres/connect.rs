@@ -169,9 +169,12 @@ async fn create_profile_tables(client: &Client, tables: &ProfileTables) {
                 past       BIGINT,
                 present    SMALLINT,
                 future     BIGINT,
+                seat_count SMALLINT,
+                seat_position SMALLINT,
+                active_players SMALLINT,
                 policy     REAL,
                 regret     REAL,
-                UNIQUE     (past, present, future, edge)
+                UNIQUE     (past, present, future, seat_count, seat_position, active_players, edge)
             );"
         );
         client

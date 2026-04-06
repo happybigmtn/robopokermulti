@@ -98,15 +98,28 @@ impl ProfileStage for Client {
         } else {
             (tables.blueprint(), tables.staging())
         };
-        let sql = format!(
-            "INSERT INTO   {blueprint} (past, present, future, edge, policy, regret)
-             SELECT                     past, present, future, edge, policy, regret FROM {staging}
-             ON CONFLICT  (past, present, future, edge)
-             DO UPDATE SET
-                 policy = EXCLUDED.policy,
-                 regret = EXCLUDED.regret;
-             DROP TABLE    {staging};"
-        );
+        let sql = if tables.is_default_hu() {
+            format!(
+                "INSERT INTO   {blueprint} (past, present, future, edge, policy, regret)
+                 SELECT                     past, present, future, edge, policy, regret FROM {staging}
+                 ON CONFLICT  (past, present, future, edge)
+                 DO UPDATE SET
+                     policy = EXCLUDED.policy,
+                     regret = EXCLUDED.regret;
+                 DROP TABLE    {staging};"
+            )
+        } else {
+            format!(
+                "INSERT INTO   {blueprint} \
+                 (past, present, future, seat_count, seat_position, active_players, edge, policy, regret)
+                 SELECT                     past, present, future, seat_count, seat_position, active_players, edge, policy, regret FROM {staging}
+                 ON CONFLICT  (past, present, future, seat_count, seat_position, active_players, edge)
+                 DO UPDATE SET
+                     policy = EXCLUDED.policy,
+                     regret = EXCLUDED.regret;
+                 DROP TABLE    {staging};"
+            )
+        };
         self.batch_execute(&sql).await.expect("upsert blueprint");
     }
 
@@ -163,15 +176,28 @@ pub mod profile_stage_sql {
         } else {
             (tables.blueprint(), tables.staging())
         };
-        format!(
-            "INSERT INTO   {blueprint} (past, present, future, edge, policy, regret)
-             SELECT                     past, present, future, edge, policy, regret FROM {staging}
-             ON CONFLICT  (past, present, future, edge)
-             DO UPDATE SET
-                 policy = EXCLUDED.policy,
-                 regret = EXCLUDED.regret;
-             DROP TABLE    {staging};"
-        )
+        if tables.is_default_hu() {
+            format!(
+                "INSERT INTO   {blueprint} (past, present, future, edge, policy, regret)
+                 SELECT                     past, present, future, edge, policy, regret FROM {staging}
+                 ON CONFLICT  (past, present, future, edge)
+                 DO UPDATE SET
+                     policy = EXCLUDED.policy,
+                     regret = EXCLUDED.regret;
+                 DROP TABLE    {staging};"
+            )
+        } else {
+            format!(
+                "INSERT INTO   {blueprint} \
+                 (past, present, future, seat_count, seat_position, active_players, edge, policy, regret)
+                 SELECT                     past, present, future, seat_count, seat_position, active_players, edge, policy, regret FROM {staging}
+                 ON CONFLICT  (past, present, future, seat_count, seat_position, active_players, edge)
+                 DO UPDATE SET
+                     policy = EXCLUDED.policy,
+                     regret = EXCLUDED.regret;
+                 DROP TABLE    {staging};"
+            )
+        }
     }
 
     /// Generate the SQL for stamping (incrementing) an epoch for a profile.
@@ -216,6 +242,9 @@ mod tests {
         assert!(sql.contains("INSERT INTO   blueprint_bp_6max_tourney"));
         assert!(sql.contains("FROM staging_bp_6max_tourney"));
         assert!(sql.contains("DROP TABLE    staging_bp_6max_tourney"));
+        assert!(sql.contains("seat_count"));
+        assert!(sql.contains("seat_position"));
+        assert!(sql.contains("active_players"));
     }
 
     #[test]

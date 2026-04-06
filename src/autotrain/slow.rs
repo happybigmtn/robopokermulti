@@ -10,6 +10,7 @@ pub struct SlowSession {
     client: Arc<Client>,
     pool: Pool,
     tables: crate::save::TrainingTables,
+    player_count: usize,
 }
 
 impl SlowSession {
@@ -23,6 +24,7 @@ impl SlowSession {
             pool: Pool::new(client.clone(), tables.clone(), player_count, profile_config).await,
             client,
             tables,
+            player_count,
         }
     }
 }
@@ -34,6 +36,9 @@ impl Trainer for SlowSession {
     }
     fn tables(&self) -> &crate::save::TrainingTables {
         &self.tables
+    }
+    fn player_count(&self) -> usize {
+        self.player_count
     }
     async fn step(&mut self) {
         self.pool.step().await;

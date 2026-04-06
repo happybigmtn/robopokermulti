@@ -22,16 +22,23 @@ pub struct ApiStrategy {
     pub history: i64,
     pub present: i64,
     pub choices: i64,
+    pub seat_count: i16,
+    pub seat_position: i16,
+    pub active_players: i16,
     pub accumulated: BTreeMap<String, f32>,
 }
 
 impl From<Strategy> for ApiStrategy {
     fn from(strategy: Strategy) -> Self {
-        let (history, present, choices) = (*strategy.info()).into();
+        let (history, present, choices, context) = (*strategy.info()).into();
+        let (seat_count, seat_position, active_players) = context.into();
         Self {
             history: history.into(),
             present: present.into(),
             choices: choices.into(),
+            seat_count: seat_count as i16,
+            seat_position: seat_position as i16,
+            active_players: active_players as i16,
             accumulated: strategy
                 .accumulated()
                 .into_iter()

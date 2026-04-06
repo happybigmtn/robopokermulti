@@ -73,7 +73,17 @@ impl From<(Info, Vec<Decision>)> for Strategy {
 impl TryFrom<ApiStrategy> for Strategy {
     type Error = anyhow::Error;
     fn try_from(api: ApiStrategy) -> Result<Self, Self::Error> {
-        let info = Info::from((api.history.into(), api.present.into(), api.choices.into()));
+        let context = InfoContext::from((
+            api.seat_count as u8,
+            api.seat_position as u8,
+            api.active_players as u8,
+        ));
+        let info = Info::from((
+            api.history.into(),
+            api.present.into(),
+            api.choices.into(),
+            context,
+        ));
         let accumulated = api
             .accumulated
             .into_iter()
@@ -96,7 +106,12 @@ mod tests {
     fn build(data: &[(Action, Probability)]) -> Strategy {
         let edges = data.iter().map(|(a, _)| Edge::from(*a)).collect::<Vec<_>>();
         let accumulated = data.iter().map(|(a, p)| (Edge::from(*a), *p)).collect();
-        let info = Info::from((Path::random(), Abstraction::random(), Path::from(edges)));
+        let info = Info::from((
+            Path::random(),
+            Abstraction::random(),
+            Path::from(edges),
+            InfoContext::heads_up(),
+        ));
         Strategy { info, accumulated }
     }
     fn sums(s: &Strategy) -> Probability {
@@ -173,6 +188,7 @@ mod tests {
             Path::random(),
             Abstraction::random(),
             Path::from(vec![f, c, r]),
+            InfoContext::heads_up(),
         ));
         let d = vec![
             Decision {

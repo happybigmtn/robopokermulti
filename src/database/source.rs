@@ -276,12 +276,12 @@ impl ProfileSource for Client {
         } else {
             tables.blueprint()
         };
-        let sql = format!(
-            "SELECT edge, policy, regret FROM {blueprint} \
-             WHERE past = $1 AND present = $2 AND future = $3"
-        );
-        let data = self
-            .query(
+        let data = if tables.is_default_hu() {
+            let sql = format!(
+                "SELECT edge, policy, regret FROM {blueprint} \
+                 WHERE past = $1 AND present = $2 AND future = $3"
+            );
+            self.query(
                 &sql,
                 &[
                     &i64::from(*info.history()),
@@ -291,14 +291,34 @@ impl ProfileSource for Client {
             )
             .await
             .expect("memory lookup")
-            .into_iter()
-            .map(|row| {
-                let edge = Edge::from(row.get::<_, i64>(0) as u64);
-                let policy = row.get::<_, f32>(1);
-                let regret = row.get::<_, f32>(2);
-                (edge, policy, regret)
-            })
-            .collect();
+        } else {
+            let sql = format!(
+                "SELECT edge, policy, regret FROM {blueprint} \
+                 WHERE past = $1 AND present = $2 AND future = $3 \
+                 AND seat_count = $4 AND seat_position = $5 AND active_players = $6"
+            );
+            self.query(
+                &sql,
+                &[
+                    &i64::from(*info.history()),
+                    &i16::from(*info.present()),
+                    &i64::from(*info.choices()),
+                    &(info.context().seat_count() as i16),
+                    &(info.context().seat_position() as i16),
+                    &(info.context().active_players() as i16),
+                ],
+            )
+            .await
+            .expect("memory lookup")
+        }
+        .into_iter()
+        .map(|row| {
+            let edge = Edge::from(row.get::<_, i64>(0) as u64);
+            let policy = row.get::<_, f32>(1);
+            let regret = row.get::<_, f32>(2);
+            (edge, policy, regret)
+        })
+        .collect();
         Memory::new(info, data)
     }
 
@@ -312,27 +332,48 @@ impl ProfileSource for Client {
         } else {
             tables.blueprint()
         };
-        let sql = format!(
-            "SELECT edge, policy FROM {blueprint} \
-             WHERE past = $1 AND present = $2 AND future = $3"
-        );
-        self.query(
-            &sql,
-            &[
-                &i64::from(*info.history()),
-                &i16::from(*info.present()),
-                &i64::from(*info.choices()),
-            ],
-        )
-        .await
-        .expect("strategy lookup")
-        .into_iter()
-        .map(|row| {
-            let edge = Edge::from(row.get::<_, i64>(0) as u64);
-            let policy = row.get::<_, f32>(1);
-            (edge, policy)
-        })
-        .collect()
+        let rows = if tables.is_default_hu() {
+            let sql = format!(
+                "SELECT edge, policy FROM {blueprint} \
+                 WHERE past = $1 AND present = $2 AND future = $3"
+            );
+            self.query(
+                &sql,
+                &[
+                    &i64::from(*info.history()),
+                    &i16::from(*info.present()),
+                    &i64::from(*info.choices()),
+                ],
+            )
+            .await
+            .expect("strategy lookup")
+        } else {
+            let sql = format!(
+                "SELECT edge, policy FROM {blueprint} \
+                 WHERE past = $1 AND present = $2 AND future = $3 \
+                 AND seat_count = $4 AND seat_position = $5 AND active_players = $6"
+            );
+            self.query(
+                &sql,
+                &[
+                    &i64::from(*info.history()),
+                    &i16::from(*info.present()),
+                    &i64::from(*info.choices()),
+                    &(info.context().seat_count() as i16),
+                    &(info.context().seat_position() as i16),
+                    &(info.context().active_players() as i16),
+                ],
+            )
+            .await
+            .expect("strategy lookup")
+        };
+        rows.into_iter()
+            .map(|row| {
+                let edge = Edge::from(row.get::<_, i64>(0) as u64);
+                let policy = row.get::<_, f32>(1);
+                (edge, policy)
+            })
+            .collect()
     }
 
     async fn equity_profile(&self, tables: &AbstractionTables, abs: Abstraction) -> Probability {

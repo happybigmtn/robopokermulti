@@ -14,6 +14,8 @@ pub trait Trainer: Send + Sync + Sized {
     fn client(&self) -> &Arc<Client>;
     /// Training table configuration (profile + abstraction version).
     fn tables(&self) -> &crate::save::TrainingTables;
+    /// Player count for the active training run.
+    fn player_count(&self) -> usize;
     /// Sync in-memory state to database on graceful exit.
     async fn sync(self);
     /// Run one training iteration.
@@ -165,6 +167,9 @@ pub trait Trainer: Send + Sync + Sized {
         let future = i64::from(Path::default());
         let present = i16::from(abs0);
         let edge = u64::from(Edge::Check) as i64;
+        let seat_count = self.player_count() as i16;
+        let seat_position = 0_i16;
+        let active_players = seat_count;
 
         let epoch_sql = format!(
             "INSERT INTO {epoch} (key, value) VALUES ('current', 0) \
@@ -176,19 +181,45 @@ pub trait Trainer: Send + Sync + Sized {
             return false;
         }
 
-        let blueprint_sql = format!(
-            "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
-             VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT (past, present, future, edge) \
-             DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
-        );
-        if let Err(err) = client
-            .execute(
-                &blueprint_sql,
-                &[&past, &present, &future, &edge, &0.5_f32, &0.0_f32],
-            )
-            .await
-        {
+        let blueprint_result = if profile.is_default_hu() {
+            let blueprint_sql = format!(
+                "INSERT INTO {blueprint} (past, present, future, edge, policy, regret) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (past, present, future, edge) \
+                 DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+            );
+            client
+                .execute(
+                    &blueprint_sql,
+                    &[&past, &present, &future, &edge, &0.5_f32, &0.0_f32],
+                )
+                .await
+        } else {
+            let blueprint_sql = format!(
+                "INSERT INTO {blueprint} \
+                 (past, present, future, seat_count, seat_position, active_players, edge, policy, regret) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT (past, present, future, seat_count, seat_position, active_players, edge) \
+                 DO UPDATE SET policy = EXCLUDED.policy, regret = EXCLUDED.regret"
+            );
+            client
+                .execute(
+                    &blueprint_sql,
+                    &[
+                        &past,
+                        &present,
+                        &future,
+                        &seat_count,
+                        &seat_position,
+                        &active_players,
+                        &edge,
+                        &0.5_f32,
+                        &0.0_f32,
+                    ],
+                )
+                .await
+        };
+        if let Err(err) = blueprint_result {
             log::error!("~ sanity: blueprint write failed: {}", err);
             let _ = client.batch_execute("ROLLBACK").await;
             return false;

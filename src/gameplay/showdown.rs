@@ -226,6 +226,88 @@ mod tests {
     }
 
     #[test]
+    fn test_three_way_side_pot_settlement() {
+        let settlement = Showdown::from(vec![
+            Settlement::from((050, State::Shoving, the_nuts())),
+            Settlement::from((100, State::Shoving, triplets())),
+            Settlement::from((150, State::Betting, one_pair())),
+        ])
+        .settle();
+
+        assert_eq!(settlement[0].pnl().reward(), 150);
+        assert_eq!(settlement[1].pnl().reward(), 100);
+        assert_eq!(settlement[2].pnl().reward(), 50);
+    }
+
+    #[test]
+    fn test_six_way_side_pot_settlement() {
+        let settlement = Showdown::from(vec![
+            Settlement::from((040, State::Shoving, the_nuts())),
+            Settlement::from((040, State::Folding, ace_high())),
+            Settlement::from((080, State::Shoving, triplets())),
+            Settlement::from((080, State::Betting, one_pair())),
+            Settlement::from((120, State::Betting, two_pair())),
+            Settlement::from((120, State::Folding, ace_high())),
+        ])
+        .settle();
+
+        assert_eq!(settlement[0].pnl().reward(), 240);
+        assert_eq!(settlement[1].pnl().reward(), 0);
+        assert_eq!(settlement[2].pnl().reward(), 160);
+        assert_eq!(settlement[3].pnl().reward(), 0);
+        assert_eq!(settlement[4].pnl().reward(), 80);
+        assert_eq!(settlement[5].pnl().reward(), 0);
+    }
+
+    #[test]
+    fn test_ten_way_side_pot_settlement() {
+        let settlement = Showdown::from(vec![
+            Settlement::from((010, State::Shoving, the_nuts())),
+            Settlement::from((010, State::Folding, ace_high())),
+            Settlement::from((020, State::Shoving, triplets())),
+            Settlement::from((020, State::Folding, ace_high())),
+            Settlement::from((030, State::Betting, two_pair())),
+            Settlement::from((030, State::Folding, ace_high())),
+            Settlement::from((040, State::Betting, one_pair())),
+            Settlement::from((040, State::Folding, ace_high())),
+            Settlement::from((050, State::Betting, ace_high())),
+            Settlement::from((050, State::Folding, ace_high())),
+        ])
+        .settle();
+
+        assert_eq!(settlement[0].pnl().reward(), 100);
+        assert_eq!(settlement[1].pnl().reward(), 0);
+        assert_eq!(settlement[2].pnl().reward(), 80);
+        assert_eq!(settlement[3].pnl().reward(), 0);
+        assert_eq!(settlement[4].pnl().reward(), 60);
+        assert_eq!(settlement[5].pnl().reward(), 0);
+        assert_eq!(settlement[6].pnl().reward(), 40);
+        assert_eq!(settlement[7].pnl().reward(), 0);
+        assert_eq!(settlement[8].pnl().reward(), 20);
+        assert_eq!(settlement[9].pnl().reward(), 0);
+    }
+
+    #[test]
+    fn test_multiway_showdown_payoff_is_zero_sum() {
+        let settlement = Showdown::from(vec![
+            Settlement::from((040, State::Shoving, the_nuts())),
+            Settlement::from((040, State::Betting, triplets())),
+            Settlement::from((080, State::Shoving, two_pair())),
+            Settlement::from((080, State::Betting, one_pair())),
+            Settlement::from((120, State::Betting, ace_high())),
+            Settlement::from((120, State::Folding, ace_high())),
+        ])
+        .settle();
+
+        let reward_sum: Chips = settlement.iter().map(|entry| entry.pnl().reward()).sum();
+        let risked_sum: Chips = settlement.iter().map(|entry| entry.pnl().risked()).sum();
+        let won_sum: Chips = settlement.iter().map(Settlement::won).sum();
+
+        assert_eq!(reward_sum, risked_sum);
+        assert_eq!(won_sum, 0);
+    }
+
+    #[test]
     fn last_man_standing() {
         let settlement = Showdown::from(vec![
             Settlement::from((050, State::Folding, the_nuts())),

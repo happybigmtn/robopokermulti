@@ -788,29 +788,41 @@ impl Game {
     }
 
     fn first_to_act_preflop(&self) -> usize {
-        let occupied: Vec<usize> = (0..self.config.seat_count)
+        let actionable: Vec<usize> = (0..self.config.seat_count)
             .filter(|&i| self.can_act(i))
             .collect();
-        if occupied.len() <= 2 {
-            self.sb_seat
-        } else {
-            let bb_pos = occupied
-                .iter()
-                .position(|&x| x == self.bb_seat)
-                .unwrap_or(0);
-            occupied[(bb_pos + 1) % occupied.len()]
+        if actionable.len() <= 1 {
+            return actionable.first().copied().unwrap_or(self.sb_seat);
         }
+        let occupied_count = (0..self.config.seat_count)
+            .filter(|&i| self.occupancy[i] == Occupancy::Active)
+            .count();
+        if occupied_count == 2 {
+            return if self.can_act(self.sb_seat) {
+                self.sb_seat
+            } else {
+                self.first_actionable_after(self.sb_seat)
+                    .unwrap_or(self.sb_seat)
+            };
+        }
+
+        self.first_actionable_after(self.bb_seat)
+            .unwrap_or(self.sb_seat)
     }
 
     fn first_to_act_postflop(&self) -> usize {
-        let occupied: Vec<usize> = (0..self.config.seat_count)
-            .filter(|&i| self.can_act(i))
-            .collect();
-        if occupied.is_empty() {
-            return self.sb_seat;
+        self.first_actionable_after(self.button)
+            .unwrap_or(self.sb_seat)
+    }
+
+    fn first_actionable_after(&self, seat: usize) -> Option<usize> {
+        for offset in 1..=self.config.seat_count {
+            let idx = (seat + offset) % self.config.seat_count;
+            if self.can_act(idx) {
+                return Some(idx);
+            }
         }
-        let btn_pos = occupied.iter().position(|&x| x == self.button).unwrap_or(0);
-        occupied[(btn_pos + 1) % occupied.len()]
+        None
     }
 
     fn complete_posting(&mut self) {
@@ -1022,6 +1034,18 @@ mod tests {
     }
 
     #[test]
+    fn test_posting_order_three_seat_cash() {
+        let config = TableConfig::for_players(3);
+        let game = Game::root_with_config(config);
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+        assert_eq!(game.actor_idx(), 0);
+        assert_eq!(game.pot(), config.small_blind + config.big_blind);
+    }
+
+    #[test]
     fn root_six_handed_positions_and_action_order() {
         let config = TableConfig::for_players(6);
         let game = Game::root_with_config(config);
@@ -1031,6 +1055,20 @@ mod tests {
         assert_eq!(game.bb_seat(), 2);
         assert_eq!(game.actor_idx(), 3);
         assert_eq!(game.pot(), config.small_blind + config.big_blind);
+    }
+
+    #[test]
+    fn test_posting_order_ten_seat_cash() {
+        let config = TableConfig::for_players(10);
+        let game = Game::root_with_config(config);
+
+        assert_eq!(game.button(), 0);
+        assert_eq!(game.sb_seat(), 1);
+        assert_eq!(game.bb_seat(), 2);
+        assert_eq!(game.actor_idx(), 3);
+        assert_eq!(game.pot(), config.small_blind + config.big_blind);
+        assert_eq!(game.seats[1].stake(), config.small_blind);
+        assert_eq!(game.seats[2].stake(), config.big_blind);
     }
 
     #[test]
@@ -1138,11 +1176,68 @@ mod tests {
     }
 
     #[test]
+    fn test_short_stacked_blinds_settle_correctly() {
+        let config = TableConfig::for_players(3).with_blinds(2, 4);
+        let small_blind_short = Game::root_with_stacks(
+            config,
+            &[
+                config.starting_stack,
+                config.small_blind - 1,
+                config.starting_stack,
+            ],
+        );
+
+        assert_eq!(
+            small_blind_short.pot(),
+            config.small_blind - 1 + config.big_blind
+        );
+        assert_eq!(small_blind_short.seats[1].state(), State::Shoving);
+        assert_eq!(small_blind_short.seats[1].stake(), config.small_blind - 1);
+        assert_eq!(small_blind_short.actor_idx(), 0);
+
+        let big_blind_short = Game::root_with_stacks(
+            config,
+            &[
+                config.starting_stack,
+                config.starting_stack,
+                config.big_blind - 1,
+            ],
+        );
+
+        assert_eq!(
+            big_blind_short.pot(),
+            config.small_blind + config.big_blind - 1
+        );
+        assert_eq!(big_blind_short.seats[2].state(), State::Shoving);
+        assert_eq!(big_blind_short.seats[2].stake(), config.big_blind - 1);
+        assert_eq!(big_blind_short.actor_idx(), 0);
+    }
+
+    #[test]
     fn postflop_action_starts_left_of_button() {
         let config = TableConfig::for_players(3);
         let mut game = Game::root_with_config(config);
 
         game = game.apply(Action::Call(game.to_call()));
+        game = game.apply(Action::Call(game.to_call()));
+        game = game.apply(Action::Check);
+
+        assert_eq!(game.turn(), Turn::Chance);
+        let Action::Draw(flop) = game.reveal() else {
+            panic!("expected flop reveal");
+        };
+        game = game.apply(Action::Draw(flop));
+
+        assert_eq!(game.actor_idx(), 1);
+    }
+
+    #[test]
+    fn test_folded_seats_are_skipped_during_action_rotation() {
+        let config = TableConfig::for_players(4);
+        let mut game = Game::root_with_config(config);
+
+        game = game.apply(Action::Call(game.to_call()));
+        game = game.apply(Action::Fold);
         game = game.apply(Action::Call(game.to_call()));
         game = game.apply(Action::Check);
 

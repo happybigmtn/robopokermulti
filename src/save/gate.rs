@@ -215,6 +215,25 @@ pub fn canonical_6max_cash_profile() -> (TrainingTables, TrainingProfileConfig) 
     (tables, config)
 }
 
+/// Canonical 10-max cash profile definition for the experimental pilot gate.
+/// 10-max is explicitly experimental until 3-max and 6-max gates pass.
+pub fn canonical_10max_cash_profile() -> (TrainingTables, TrainingProfileConfig) {
+    let tables = TrainingTables::new("bp_10max_cash", "abs_v4_p10");
+    let config = TrainingProfileConfig::from_json(
+        &serde_json::json!({
+            "player_count": 10,
+            "format": "cash",
+            "abstraction_version": "abs_v4_p10",
+            "blinds": "1/2",
+            "ante": 0,
+            "stack_bb": 50
+        })
+        .to_string(),
+    )
+    .expect("canonical 10-max cash profile config");
+    (tables, config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +676,93 @@ mod tests {
         pending_3max.verdict = GateVerdict::Pending;
         let err = validate_10max_prerequisites(&[pending_3max, pass_6max]).unwrap_err();
         assert!(err.contains("3-max"), "got: {}", err);
+    }
+
+    // --- RPM-11 spec-required tests ---
+
+    #[test]
+    fn test_10max_profile_round_trip_pilot() {
+        let (tables, config) = canonical_10max_cash_profile();
+
+        assert_eq!(tables.profile.profile_key(), "bp_10max_cash");
+        assert_eq!(tables.abstraction.abstraction_version(), "abs_v4_p10");
+        assert!(!tables.profile.is_default_hu());
+        assert!(!tables.abstraction.is_default_v1());
+        assert_eq!(tables.profile.info_version(), InfoVersion::V2);
+
+        let parsed = tables.abstraction.parsed_version().unwrap();
+        assert_eq!(parsed.player_count(), 10);
+        assert!(parsed.is_v4_or_newer());
+
+        assert_eq!(config.resolved_schedule().len(), 1);
+
+        // Table names are 10-max-specific
+        assert_eq!(tables.abstraction.isomorphism(), "isomorphism_abs_v4_p10");
+        assert_eq!(tables.profile.blueprint(), "blueprint_bp_10max_cash");
+    }
+
+    #[test]
+    fn test_10max_tables_isolated_from_lower_seat_counts() {
+        let (t3, _) = canonical_3max_cash_profile();
+        let (t6, _) = canonical_6max_cash_profile();
+        let (t10, _) = canonical_10max_cash_profile();
+
+        // All three use V2 schema
+        assert_eq!(t3.profile.info_version(), InfoVersion::V2);
+        assert_eq!(t6.profile.info_version(), InfoVersion::V2);
+        assert_eq!(t10.profile.info_version(), InfoVersion::V2);
+
+        // All table names are fully distinct
+        let blueprints = [
+            t3.profile.blueprint(),
+            t6.profile.blueprint(),
+            t10.profile.blueprint(),
+        ];
+        let isos = [
+            t3.abstraction.isomorphism(),
+            t6.abstraction.isomorphism(),
+            t10.abstraction.isomorphism(),
+        ];
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                assert_ne!(blueprints[i], blueprints[j]);
+                assert_ne!(isos[i], isos[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_10max_gate_record_records_experimental_status() {
+        let record = GateRecord {
+            profile_id: "bp_10max_cash".to_string(),
+            abstraction_version: "abs_v4_p10".to_string(),
+            engine_version: "v2".to_string(),
+            info_version: "V2".to_string(),
+            seat_count: 10,
+            clustering_status: GateStatus::Untested,
+            training_status: GateStatus::Untested,
+            serving_status: GateStatus::Untested,
+            benchmarks: GateBenchmarks {
+                memory_mb: None,
+                db_size_mb: None,
+                clustering_runtime_secs: None,
+                training_runtime_secs: None,
+                query_latency_ms: None,
+            },
+            verdict: GateVerdict::Pending,
+            notes: "experimental pilot — requires 3-max and 6-max PASS first".to_string(),
+        };
+        assert!(record.validate().is_ok());
+
+        // Cannot upgrade to PASS without benchmarks
+        let mut pass_attempt = record;
+        pass_attempt.verdict = GateVerdict::Pass;
+        assert!(pass_attempt.validate().is_err());
+
+        // Can record FAIL with benchmark evidence (measured limit)
+        pass_attempt.verdict = GateVerdict::Fail;
+        pass_attempt.benchmarks.memory_mb = Some(8192.0);
+        pass_attempt.notes = "OOM during clustering at 10-max".to_string();
+        assert!(pass_attempt.validate().is_ok());
     }
 }

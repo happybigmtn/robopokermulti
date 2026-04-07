@@ -86,6 +86,99 @@ impl GateRecord {
     }
 }
 
+/// A single row in the benchmark matrix, recording performance measurements
+/// for one training configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkEntry {
+    pub seat_count: usize,
+    pub profile_id: String,
+    pub abstraction_version: String,
+    pub batch_size: Option<usize>,
+    pub tree_count: Option<usize>,
+    pub clustering_runtime_secs: Option<f64>,
+    pub training_throughput_iters_per_sec: Option<f64>,
+    pub memory_pressure_mb: Option<f64>,
+    pub db_footprint_mb: Option<f64>,
+    pub strategy_lookup_latency_ms: Option<f64>,
+}
+
+impl BenchmarkEntry {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(2..=10).contains(&self.seat_count) {
+            return Err(format!("seat_count must be 2-10 (got {})", self.seat_count));
+        }
+        if self.profile_id.is_empty() {
+            return Err("profile_id is required".to_string());
+        }
+        if self.abstraction_version.is_empty() {
+            return Err("abstraction_version is required".to_string());
+        }
+        let has_any = self.clustering_runtime_secs.is_some()
+            || self.training_throughput_iters_per_sec.is_some()
+            || self.memory_pressure_mb.is_some()
+            || self.db_footprint_mb.is_some()
+            || self.strategy_lookup_latency_ms.is_some();
+        if !has_any {
+            return Err("benchmark entry must include at least one measurement".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Quality evidence required for blueprint promotion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityGate {
+    pub seat_count: usize,
+    pub profile_id: String,
+    pub self_play_stability: Option<QualitySignal>,
+    pub exploitability_proxy: Option<QualitySignal>,
+    pub policy_smoothness: Option<QualitySignal>,
+    pub restart_determinism: Option<QualitySignal>,
+}
+
+/// A single quality measurement with a value and pass/fail evaluation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualitySignal {
+    pub value: f64,
+    pub description: String,
+    pub pass: bool,
+}
+
+impl QualityGate {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(2..=10).contains(&self.seat_count) {
+            return Err(format!("seat_count must be 2-10 (got {})", self.seat_count));
+        }
+        if self.profile_id.is_empty() {
+            return Err("profile_id is required".to_string());
+        }
+        if self.restart_determinism.is_none() {
+            return Err("restart_determinism is required for quality gates".to_string());
+        }
+        if self.policy_smoothness.is_none() {
+            return Err("policy_smoothness is required for quality gates".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Validates that a 10-max gate attempt has recorded prior 3-max and 6-max evidence.
+pub fn validate_10max_prerequisites(prior_gates: &[GateRecord]) -> Result<(), String> {
+    let has_3max_pass = prior_gates
+        .iter()
+        .any(|g| g.seat_count == 3 && g.verdict == GateVerdict::Pass);
+    let has_6max_pass = prior_gates
+        .iter()
+        .any(|g| g.seat_count == 6 && g.verdict == GateVerdict::Pass);
+    if !has_3max_pass {
+        return Err("10-max gate requires prior 3-max PASS evidence".to_string());
+    }
+    if !has_6max_pass {
+        return Err("10-max gate requires prior 6-max PASS evidence".to_string());
+    }
+    Ok(())
+}
+
 /// Canonical 3-max cash profile definition for the first validation gate.
 pub fn canonical_3max_cash_profile() -> (TrainingTables, TrainingProfileConfig) {
     let tables = TrainingTables::new("bp_3max_cash", "abs_v4_p3");
@@ -381,5 +474,188 @@ mod tests {
         assert_eq!(deserialized.profile_id, "bp_6max_cash");
         assert_eq!(deserialized.seat_count, 6);
         assert_eq!(deserialized.verdict, GateVerdict::Pending);
+    }
+
+    // --- RPM-10 spec-required tests ---
+
+    #[test]
+    fn test_benchmark_matrix_records_required_dimensions() {
+        // Valid benchmark entry with all measurements
+        let entry = BenchmarkEntry {
+            seat_count: 3,
+            profile_id: "bp_3max_cash".to_string(),
+            abstraction_version: "abs_v4_p3".to_string(),
+            batch_size: Some(128),
+            tree_count: Some(0x10000000),
+            clustering_runtime_secs: Some(45.2),
+            training_throughput_iters_per_sec: Some(1200.0),
+            memory_pressure_mb: Some(512.0),
+            db_footprint_mb: Some(80.0),
+            strategy_lookup_latency_ms: Some(2.5),
+        };
+        assert!(entry.validate().is_ok());
+
+        // Entry without any measurements is rejected
+        let empty = BenchmarkEntry {
+            seat_count: 6,
+            profile_id: "bp_6max_cash".to_string(),
+            abstraction_version: "abs_v4_p6".to_string(),
+            batch_size: None,
+            tree_count: None,
+            clustering_runtime_secs: None,
+            training_throughput_iters_per_sec: None,
+            memory_pressure_mb: None,
+            db_footprint_mb: None,
+            strategy_lookup_latency_ms: None,
+        };
+        let err = empty.validate().unwrap_err();
+        assert!(err.contains("measurement"), "got: {}", err);
+
+        // Entry without profile_id is rejected
+        let no_profile = BenchmarkEntry {
+            seat_count: 3,
+            profile_id: String::new(),
+            abstraction_version: "abs_v4_p3".to_string(),
+            batch_size: None,
+            tree_count: None,
+            clustering_runtime_secs: Some(10.0),
+            training_throughput_iters_per_sec: None,
+            memory_pressure_mb: None,
+            db_footprint_mb: None,
+            strategy_lookup_latency_ms: None,
+        };
+        assert!(no_profile.validate().is_err());
+
+        // Round-trip serialization preserves all dimensions
+        let json = serde_json::to_string(&entry).unwrap();
+        let rt: BenchmarkEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(rt.seat_count, 3);
+        assert_eq!(rt.batch_size, Some(128));
+        assert_eq!(rt.clustering_runtime_secs, Some(45.2));
+    }
+
+    #[test]
+    fn test_quality_gate_requires_restart_determinism() {
+        let gate = QualityGate {
+            seat_count: 3,
+            profile_id: "bp_3max_cash".to_string(),
+            self_play_stability: Some(QualitySignal {
+                value: 0.98,
+                description: "win rate variance < 2%".to_string(),
+                pass: true,
+            }),
+            exploitability_proxy: Some(QualitySignal {
+                value: 0.05,
+                description: "regret sum below threshold".to_string(),
+                pass: true,
+            }),
+            policy_smoothness: Some(QualitySignal {
+                value: 0.92,
+                description: "adjacent-state policy correlation".to_string(),
+                pass: true,
+            }),
+            restart_determinism: None,
+        };
+        let err = gate.validate().unwrap_err();
+        assert!(
+            err.contains("restart_determinism"),
+            "expected restart_determinism error, got: {}",
+            err
+        );
+
+        // With restart_determinism present, validation passes
+        let mut complete = gate;
+        complete.restart_determinism = Some(QualitySignal {
+            value: 1.0,
+            description: "identical output across restarts".to_string(),
+            pass: true,
+        });
+        assert!(complete.validate().is_ok());
+    }
+
+    #[test]
+    fn test_quality_gate_requires_policy_smoothness_signal() {
+        let gate = QualityGate {
+            seat_count: 6,
+            profile_id: "bp_6max_cash".to_string(),
+            self_play_stability: None,
+            exploitability_proxy: None,
+            policy_smoothness: None,
+            restart_determinism: Some(QualitySignal {
+                value: 1.0,
+                description: "deterministic".to_string(),
+                pass: true,
+            }),
+        };
+        let err = gate.validate().unwrap_err();
+        assert!(
+            err.contains("policy_smoothness"),
+            "expected policy_smoothness error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_10max_gate_requires_prior_3max_and_6max_evidence() {
+        let pass_3max = GateRecord {
+            profile_id: "bp_3max_cash".to_string(),
+            abstraction_version: "abs_v4_p3".to_string(),
+            engine_version: "v2".to_string(),
+            info_version: "V2".to_string(),
+            seat_count: 3,
+            clustering_status: GateStatus::Pass,
+            training_status: GateStatus::Pass,
+            serving_status: GateStatus::Pass,
+            benchmarks: GateBenchmarks {
+                memory_mb: Some(256.0),
+                db_size_mb: Some(80.0),
+                clustering_runtime_secs: Some(45.0),
+                training_runtime_secs: Some(3600.0),
+                query_latency_ms: Some(2.0),
+            },
+            verdict: GateVerdict::Pass,
+            notes: String::new(),
+        };
+
+        let pass_6max = GateRecord {
+            profile_id: "bp_6max_cash".to_string(),
+            abstraction_version: "abs_v4_p6".to_string(),
+            engine_version: "v2".to_string(),
+            info_version: "V2".to_string(),
+            seat_count: 6,
+            clustering_status: GateStatus::Pass,
+            training_status: GateStatus::Pass,
+            serving_status: GateStatus::Pass,
+            benchmarks: GateBenchmarks {
+                memory_mb: Some(1024.0),
+                db_size_mb: Some(400.0),
+                clustering_runtime_secs: Some(200.0),
+                training_runtime_secs: Some(14400.0),
+                query_latency_ms: Some(5.0),
+            },
+            verdict: GateVerdict::Pass,
+            notes: String::new(),
+        };
+
+        // No prior evidence — rejected
+        let err = validate_10max_prerequisites(&[]).unwrap_err();
+        assert!(err.contains("3-max"), "got: {}", err);
+
+        // Only 3-max — rejected
+        let err = validate_10max_prerequisites(&[pass_3max.clone()]).unwrap_err();
+        assert!(err.contains("6-max"), "got: {}", err);
+
+        // Only 6-max — rejected
+        let err = validate_10max_prerequisites(&[pass_6max.clone()]).unwrap_err();
+        assert!(err.contains("3-max"), "got: {}", err);
+
+        // Both 3-max and 6-max PASS — accepted
+        assert!(validate_10max_prerequisites(&[pass_3max.clone(), pass_6max.clone()]).is_ok());
+
+        // 3-max PENDING + 6-max PASS — rejected
+        let mut pending_3max = pass_3max;
+        pending_3max.verdict = GateVerdict::Pending;
+        let err = validate_10max_prerequisites(&[pending_3max, pass_6max]).unwrap_err();
+        assert!(err.contains("3-max"), "got: {}", err);
     }
 }

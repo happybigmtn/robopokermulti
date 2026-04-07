@@ -405,6 +405,177 @@ mod tests {
         // V2 profile must not use V1 serialization — this must panic
         let _rows: Vec<_> = profile.rows().collect();
     }
+
+    // ----- RPM-06 Required Tests -----
+
+    /// RPM-06 AC: V2 rows round-trip through the full hydrate boundary.
+    /// Multiple distinct InfoContexts (seat positions + active topologies)
+    /// survive serialization and reconstruct to equal Info keys.
+    #[test]
+    fn test_profile_native_hydrate_round_trip() {
+        let mut profile = NlheProfile::for_players(6);
+        let contexts = [
+            InfoContext::from((6, 0, 6)),
+            InfoContext::from((6, 3, 6)),
+            InfoContext::from((6, 0, 4)),
+            InfoContext::from((6, 5, 2)),
+        ];
+        let mut expected = Vec::new();
+        for (i, ctx) in contexts.iter().enumerate() {
+            let info = Info::from((
+                Path::from(vec![Edge::Call]),
+                Abstraction::from(i as i16),
+                Path::from(vec![Edge::Check, Edge::Fold]),
+                *ctx,
+            ));
+            let mut edges = BTreeMap::new();
+            edges.insert(Edge::Check, (0.7, 0.1));
+            edges.insert(Edge::Fold, (0.3, -0.1));
+            expected.push((info, 2));
+            profile.encounters.insert(info, edges);
+        }
+
+        let rows: Vec<_> = profile.rows_profile().collect();
+        assert_eq!(rows.len(), 8, "4 infos * 2 edges each = 8 rows");
+
+        for row in &rows {
+            let (past, present, future, sc, sp, ap, _edge, _policy, _regret) = *row;
+            let recovered = Info::from((
+                Path::from(past as u64),
+                Abstraction::from(present),
+                Path::from(future as u64),
+                InfoContext::from((sc as u8, sp as u8, ap as u8)),
+            ));
+            let original = expected
+                .iter()
+                .find(|(info, _)| *info == recovered)
+                .expect("every row must recover to a known original Info");
+            assert_eq!(
+                recovered.context().seat_count(),
+                original.0.context().seat_count()
+            );
+            assert_eq!(
+                recovered.context().seat_position(),
+                original.0.context().seat_position()
+            );
+            assert_eq!(
+                recovered.context().active_players(),
+                original.0.context().active_players()
+            );
+        }
+    }
+
+    /// RPM-06 AC: calling V2 rows_profile() on a V1 profile panics.
+    /// Complements the existing V2→V1 mismatch test above.
+    #[test]
+    #[should_panic(expected = "rows_profile() requires V2 profile")]
+    fn test_blueprint_schema_version_mismatch_rejected() {
+        let mut profile = NlheProfile::default();
+        let info = Info::from((
+            Path::default(),
+            Abstraction::from(1_i16),
+            Path::from(vec![Edge::Check]),
+        ));
+        let mut memory = BTreeMap::new();
+        memory.insert(Edge::Check, (1.0, 0.0));
+        profile.encounters.insert(info, memory);
+        // V1 profile must not use V2 serialization — this must panic
+        let _rows: Vec<_> = profile.rows_profile().collect();
+    }
+
+    /// RPM-06 AC: large position-aware row emission preserves seat context.
+    /// Exercises the COPY ingestion shape with 1000+ rows across varied seats.
+    #[test]
+    fn test_large_copy_ingestion_for_position_aware_rows() {
+        let seat_count = 6u8;
+        let mut profile = NlheProfile::for_players(seat_count as usize);
+        let edges_per_info = vec![Edge::Check, Edge::Fold, Edge::Call];
+
+        // Generate 6 seats * 5 active topologies (2..=6) * 12 abstractions = 360 infos
+        // each with 3 edges = 1080 rows
+        let mut total_infos = 0usize;
+        for seat_pos in 0..seat_count {
+            for active in 2..=seat_count {
+                for bucket in 0..12i16 {
+                    let ctx = InfoContext::from((seat_count, seat_pos, active));
+                    let info = Info::from((
+                        Path::from(vec![Edge::Call]),
+                        Abstraction::from(bucket),
+                        Path::from(edges_per_info.clone()),
+                        ctx,
+                    ));
+                    let mut memory = BTreeMap::new();
+                    for edge in &edges_per_info {
+                        memory.insert(*edge, (1.0 / edges_per_info.len() as f32, 0.0));
+                    }
+                    profile.encounters.insert(info, memory);
+                    total_infos += 1;
+                }
+            }
+        }
+
+        let rows: Vec<_> = profile.rows_profile().collect();
+        let expected_rows = total_infos * edges_per_info.len();
+        assert_eq!(
+            rows.len(),
+            expected_rows,
+            "row count must equal infos * edges_per_info"
+        );
+        assert!(rows.len() >= 1000, "test must exercise 1000+ rows");
+
+        // Every row must carry valid seat context
+        for row in &rows {
+            let (_past, _present, _future, sc, sp, ap, _edge, _policy, _regret) = *row;
+            assert_eq!(sc, seat_count as i16, "seat_count must match profile");
+            assert!(
+                sp >= 0 && sp < seat_count as i16,
+                "seat_position out of range: {sp}"
+            );
+            assert!(
+                ap >= 2 && ap <= seat_count as i16,
+                "active_players out of range: {ap}"
+            );
+        }
+    }
+
+    /// RPM-06 AC: row count equals the sum of edges across all infosets.
+    #[test]
+    fn test_clustered_row_count_integrity_checks() {
+        let mut profile = NlheProfile::for_players(3);
+        let mut expected_row_count = 0usize;
+
+        // Build profiles with varying edge counts per info
+        let edge_sets: Vec<Vec<Edge>> = vec![
+            vec![Edge::Check, Edge::Fold],
+            vec![Edge::Check, Edge::Fold, Edge::Call],
+            vec![Edge::Check],
+            vec![Edge::Fold, Edge::Call, Edge::Shove, Edge::Check],
+        ];
+
+        for (i, edge_set) in edge_sets.iter().enumerate() {
+            let ctx = InfoContext::from((3, (i % 3) as u8, 3));
+            let info = Info::from((
+                Path::from(vec![Edge::Call]),
+                Abstraction::from(i as i16),
+                Path::from(edge_set.clone()),
+                ctx,
+            ));
+            let mut memory = BTreeMap::new();
+            for edge in edge_set {
+                memory.insert(*edge, (1.0, 0.0));
+            }
+            expected_row_count += edge_set.len();
+            profile.encounters.insert(info, memory);
+        }
+
+        let rows: Vec<_> = profile.rows_profile().collect();
+        assert_eq!(
+            rows.len(),
+            expected_row_count,
+            "total row count must equal sum of edges across all infos: expected {expected_row_count}, got {}",
+            rows.len()
+        );
+    }
 }
 
 #[cfg(feature = "disk")]

@@ -1,5 +1,18 @@
 use super::*;
 
+/// Explicit training environment inputs, decoupled from raw env-var reads
+/// so validation logic is testable without global state mutation.
+#[derive(Default)]
+struct TrainingEnvInput {
+    profile_id: Option<String>,
+    profile_key: Option<String>,
+    profile_format: Option<String>,
+    profile_config_path: Option<String>,
+    profile_config_json: Option<String>,
+    abstraction_version: Option<String>,
+    player_count: Option<String>,
+}
+
 /// Training mode parsed from command line arguments
 pub enum Mode {
     Status,
@@ -94,7 +107,7 @@ impl Mode {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct TrainingSettings {
     tables: crate::save::TrainingTables,
     player_count: usize,
@@ -104,32 +117,49 @@ struct TrainingSettings {
 
 impl TrainingSettings {
     fn from_env() -> Result<Self, String> {
-        let profile_id = env_optional("PROFILE_ID");
-        let profile_key = env_optional("PROFILE_KEY");
-        let profile_format = env_optional("PROFILE_FORMAT").unwrap_or_else(|| "cash".to_string());
-        let profile_config_path = env_optional("PROFILE_CONFIG_PATH");
-        let profile_config_json = env_optional("PROFILE_CONFIG_JSON");
-        let abstraction_version = env_optional("ABSTRACTION_VERSION");
-        let player_count = env_optional("PLAYER_COUNT").and_then(|v| v.parse::<usize>().ok());
-        let format_set = env_optional("PROFILE_FORMAT").is_some();
+        Self::from_env_values(&TrainingEnvInput {
+            profile_id: env_optional("PROFILE_ID"),
+            profile_key: env_optional("PROFILE_KEY"),
+            profile_format: env_optional("PROFILE_FORMAT"),
+            profile_config_path: env_optional("PROFILE_CONFIG_PATH"),
+            profile_config_json: env_optional("PROFILE_CONFIG_JSON"),
+            abstraction_version: env_optional("ABSTRACTION_VERSION"),
+            player_count: env_optional("PLAYER_COUNT"),
+        })
+    }
 
-        let any_set = profile_key.is_some()
-            || profile_id.is_some()
-            || abstraction_version.is_some()
+    fn from_env_values(input: &TrainingEnvInput) -> Result<Self, String> {
+        let profile_format_raw = input
+            .profile_format
+            .clone()
+            .unwrap_or_else(|| "cash".to_string());
+        let player_count = input
+            .player_count
+            .as_ref()
+            .and_then(|v| v.parse::<usize>().ok());
+
+        let any_set = input.profile_key.is_some()
+            || input.profile_id.is_some()
+            || input.abstraction_version.is_some()
             || player_count.is_some()
-            || profile_config_path.is_some()
-            || profile_config_json.is_some()
-            || format_set;
+            || input.profile_config_path.is_some()
+            || input.profile_config_json.is_some()
+            || input.profile_format.is_some();
+
+        // Profile metadata is mandatory for all new training runs.
+        // Silent fallback to heads-up defaults is no longer supported.
         if !any_set {
-            return Ok(Self {
-                tables: crate::save::TrainingTables::default_hu(),
-                player_count: 2,
-                profile: None,
-                profile_config: None,
-            });
+            return Err(
+                "profile metadata required: set PLAYER_COUNT, ABSTRACTION_VERSION, \
+                 and optionally PROFILE_KEY (heads-up fallback is no longer supported \
+                 for new training runs)"
+                    .to_string(),
+            );
         }
 
-        let abstraction_version = abstraction_version
+        let abstraction_version = input
+            .abstraction_version
+            .clone()
             .ok_or("ABSTRACTION_VERSION is required when using profile training")?;
         let player_count =
             player_count.ok_or("PLAYER_COUNT is required when using profile training")?;
@@ -144,15 +174,15 @@ impl TrainingSettings {
             return Err(format!("PLAYER_COUNT must be 2-10 (got {})", player_count));
         }
 
-        let profile_format = normalize_format(&profile_format)?;
+        let profile_format = normalize_format(&profile_format_raw)?;
 
         let config_json = load_profile_config_json(
-            profile_config_path.as_deref(),
-            profile_config_json.as_deref(),
+            input.profile_config_path.as_deref(),
+            input.profile_config_json.as_deref(),
             player_count,
             &profile_format,
-            profile_key.as_deref(),
-            profile_id.as_deref(),
+            input.profile_key.as_deref(),
+            input.profile_id.as_deref(),
             &abstraction_version,
         )?;
 
@@ -174,9 +204,14 @@ impl TrainingSettings {
             ));
         }
 
-        let derived_profile_id = profile_id.unwrap_or_else(|| derive_profile_id(&config_json));
-        let derived_profile_key =
-            profile_key.unwrap_or_else(|| derive_profile_key(&derived_profile_id));
+        let derived_profile_id = input
+            .profile_id
+            .clone()
+            .unwrap_or_else(|| derive_profile_id(&config_json));
+        let derived_profile_key = input
+            .profile_key
+            .clone()
+            .unwrap_or_else(|| derive_profile_key(&derived_profile_id));
 
         if derived_profile_key.is_empty() {
             return Err("derived PROFILE_KEY is empty".to_string());
@@ -305,4 +340,98 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_multiway_input(player_count: usize) -> TrainingEnvInput {
+        TrainingEnvInput {
+            player_count: Some(player_count.to_string()),
+            abstraction_version: Some(format!("abs_v4_p{player_count}")),
+            ..Default::default()
+        }
+    }
+
+    /// RPM-06 AC: fast training requires profile metadata.
+    /// Both fast and slow modes share the same TrainingSettings::from_env_values
+    /// entry point, so this validates the shared config path that fast training uses.
+    #[test]
+    fn test_fast_training_requires_profile_metadata() {
+        let input = TrainingEnvInput::default();
+        let result = TrainingSettings::from_env_values(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("profile metadata required"),
+            "expected profile-required error, got: {err}"
+        );
+    }
+
+    /// RPM-06 AC: slow training requires profile metadata.
+    /// Validates the same shared config path from the slow-training perspective.
+    #[test]
+    fn test_slow_training_requires_profile_metadata() {
+        let input = TrainingEnvInput::default();
+        let result = TrainingSettings::from_env_values(&input);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("heads-up fallback is no longer supported"),
+            "error should explain that HU fallback is removed"
+        );
+    }
+
+    /// RPM-06 AC: multiway training never produces default-HU tables.
+    #[test]
+    fn test_multiway_training_rejects_heads_up_fallback() {
+        for n in [3, 6, 10] {
+            let input = minimal_multiway_input(n);
+            let settings = TrainingSettings::from_env_values(&input)
+                .unwrap_or_else(|e| panic!("valid {n}-player config rejected: {e}"));
+            assert!(
+                !settings.tables.profile.is_default_hu(),
+                "{n}-player training must not produce default HU profile tables"
+            );
+            assert!(
+                !settings.tables.abstraction.is_default_v1(),
+                "{n}-player training must not produce default V1 abstraction tables"
+            );
+            assert_eq!(settings.player_count, n);
+            assert!(
+                settings.profile.is_some(),
+                "{n}-player training must produce profile metadata"
+            );
+        }
+    }
+
+    /// Verify that setting only PLAYER_COUNT without ABSTRACTION_VERSION errors.
+    #[test]
+    fn test_partial_profile_metadata_rejected() {
+        let input = TrainingEnvInput {
+            player_count: Some("6".to_string()),
+            ..Default::default()
+        };
+        let result = TrainingSettings::from_env_values(&input);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("ABSTRACTION_VERSION is required"),
+            "partial metadata should require ABSTRACTION_VERSION"
+        );
+    }
+
+    /// Verify that valid 2-player profile training works (explicit, not fallback).
+    #[test]
+    fn test_explicit_heads_up_profile_accepted() {
+        let input = minimal_multiway_input(2);
+        let settings = TrainingSettings::from_env_values(&input)
+            .expect("explicit 2-player profile should be accepted");
+        assert_eq!(settings.player_count, 2);
+        assert!(!settings.tables.profile.is_default_hu());
+        assert!(settings.profile.is_some());
+    }
 }

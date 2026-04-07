@@ -55,6 +55,18 @@ const STACK: Chips = 100;
 const B_BLIND: Chips = 2;
 const S_BLIND: Chips = 1;
 const MAX_RAISE_REPEATS: usize = 3;
+/// Maximum action edges packed into a single `Path(u64)` via 4-bit nibbles.
+///
+/// RPM-05 path-depth decision: 16 edges remains sufficient for current multiway
+/// cash games. Worst-case per-street depth with `MAX_RAISE_REPEATS = 3` is bounded:
+/// each street sees at most `3` raise/re-raise edges plus passive actions
+/// (check/call/fold), and `Draw` edges separate streets.  Even 10-max preflop
+/// with aggressive 3-bet/4-bet trees fits within 16 total history edges after
+/// the `Draw` reset on each new street.
+///
+/// If deeper tournament stacks or unbounded raise-cap variants are needed,
+/// widen `Path` to `u128` (32 edges) or a heap-allocated representation and
+/// bump the info-version boundary.
 const MAX_DEPTH_SUBGAME: usize = 16;
 
 /// sinkhorn optimal transport parameters

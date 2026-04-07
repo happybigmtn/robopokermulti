@@ -237,4 +237,41 @@ mod tests {
             assert!(p > 0.0 && p <= 1.0);
         }
     }
+
+    // ----- RPM-05 Required Tests -----
+
+    /// RPM-05 AC: ApiStrategy round-trips InfoContext through serialize/deserialize.
+    #[test]
+    fn test_analysis_api_round_trips_info_context() {
+        use crate::dto::ApiStrategy;
+        let ctx = InfoContext::from((6, 4, 5));
+        let info = Info::from((
+            Path::from(vec![Edge::Call, Edge::Check]),
+            Abstraction::from(77_i16),
+            Path::from(vec![Edge::Fold, Edge::Check]),
+            ctx,
+        ));
+        let decisions = vec![
+            Decision {
+                edge: Edge::Fold,
+                mass: 0.4,
+            },
+            Decision {
+                edge: Edge::Check,
+                mass: 0.6,
+            },
+        ];
+        let strategy = Strategy::from((info, decisions));
+        let api: ApiStrategy = strategy.clone().into();
+        // Verify context fields are present in the DTO
+        assert_eq!(api.seat_count, 6);
+        assert_eq!(api.seat_position, 4);
+        assert_eq!(api.active_players, 5);
+        // Round-trip back through TryFrom
+        let recovered = Strategy::try_from(api).expect("round-trip succeeds");
+        assert_eq!(recovered.info().context().seat_count(), 6);
+        assert_eq!(recovered.info().context().seat_position(), 4);
+        assert_eq!(recovered.info().context().active_players(), 5);
+        assert_eq!(recovered.info(), strategy.info());
+    }
 }

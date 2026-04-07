@@ -4,16 +4,27 @@ use crate::mccfr::*;
 use crate::*;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "server")]
+use crate::save::InfoVersion;
+
 /// NLHE Profile for MCCFR training.
 ///
 /// Supports multiway games (2-10 players) via the `player_count` field.
 /// The walker rotates across all players: `Turn::Choice(epochs % player_count)`.
+///
+/// `info_version` tracks the persistence schema version:
+/// - `V1`: legacy heads-up, blueprint key is `(past, present, future, edge)`
+/// - `V2`: context-aware, blueprint key includes seat context
+///
+/// Serialization methods are version-gated: `rows()` requires V1, `rows_profile()` requires V2.
 pub struct NlheProfile {
     pub iterations: usize,
     pub encounters: BTreeMap<Info, BTreeMap<Edge, (Probability, Utility)>>,
     pub metrics: Metrics,
     /// Number of players in the game (2-10). Default is 2 for heads-up.
     pub player_count: usize,
+    #[cfg(feature = "server")]
+    info_version: InfoVersion,
 }
 
 impl Default for NlheProfile {
@@ -22,24 +33,40 @@ impl Default for NlheProfile {
             iterations: 0,
             encounters: BTreeMap::new(),
             metrics: Metrics::default(),
-            player_count: 2, // Default to heads-up for backward compatibility
+            player_count: 2,
+            #[cfg(feature = "server")]
+            info_version: InfoVersion::V1,
         }
     }
 }
 
 impl NlheProfile {
-    /// Create a new profile for N-player games.
+    /// Create a new profile for N-player multiway training (V2 schema).
     pub fn for_players(n: usize) -> Self {
         assert!(n >= 2 && n <= 10, "player_count must be 2-10");
         Self {
             player_count: n,
+            #[cfg(feature = "server")]
+            info_version: InfoVersion::V2,
             ..Self::default()
         }
     }
 
+    #[cfg(feature = "server")]
+    pub fn info_version(&self) -> InfoVersion {
+        self.info_version
+    }
+
+    /// Emit V2 rows with explicit seat context. Panics if profile is V1.
     pub fn rows_profile(
         self,
     ) -> impl Iterator<Item = (i64, i16, i64, i16, i16, i16, i64, f32, f32)> {
+        #[cfg(feature = "server")]
+        assert_eq!(
+            self.info_version,
+            InfoVersion::V2,
+            "rows_profile() requires V2 profile; use rows() for V1"
+        );
         self.encounters.into_iter().flat_map(|(info, edges)| {
             let history = i64::from(*info.history());
             let present = i16::from(*info.present());
@@ -202,7 +229,13 @@ impl crate::save::Hydrate for NlheProfile {
 
 #[cfg(feature = "database")]
 impl NlheProfile {
+    /// Emit V1 rows without seat context. Panics if profile is V2.
     pub fn rows(self) -> impl Iterator<Item = (i64, i16, i64, i64, f32, f32)> {
+        assert_eq!(
+            self.info_version,
+            InfoVersion::V1,
+            "rows() requires V1 profile; use rows_profile() for V2"
+        );
         self.encounters.into_iter().flat_map(|(info, edges)| {
             let history = i64::from(*info.history());
             let present = i16::from(*info.present());
@@ -278,12 +311,18 @@ impl NlheProfile {
                 .entry(edge)
                 .or_insert((policy, regret));
         }
-        log::info!("loaded {} infos from database", encounters.len());
+        let info_version = tables.profile.info_version();
+        log::info!(
+            "loaded {} infos from database (version {:?})",
+            encounters.len(),
+            info_version
+        );
         Self {
             iterations,
             encounters,
             metrics: Metrics::default(),
             player_count,
+            info_version,
         }
     }
 }
@@ -311,6 +350,60 @@ mod tests {
         assert_eq!(rows[0].3, 6);
         assert_eq!(rows[0].4, 2);
         assert_eq!(rows[0].5, 4);
+    }
+
+    // ----- RPM-05 Required Tests -----
+
+    /// RPM-05 AC: V2 rows round-trip InfoContext through the serialization boundary.
+    #[test]
+    fn test_profile_rows_round_trip_info_context() {
+        let ctx = InfoContext::from((6, 3, 5));
+        let info = Info::from((
+            Path::from(vec![Edge::Call, Edge::Check]),
+            Abstraction::from(99_i16),
+            Path::from(vec![Edge::Check, Edge::Fold, Edge::Raise(Odds(1, 2))]),
+            ctx,
+        ));
+        let mut profile = NlheProfile::for_players(6);
+        let mut memory = BTreeMap::new();
+        memory.insert(Edge::Check, (0.5, 0.3));
+        memory.insert(Edge::Fold, (0.5, -0.3));
+        profile.encounters.insert(info, memory);
+
+        let rows: Vec<_> = profile.rows_profile().collect();
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let (past, present, future, sc, sp, ap, _edge, _policy, _regret) = *row;
+            // Reconstruct Info from the row columns
+            let recovered = Info::from((
+                Path::from(past as u64),
+                Abstraction::from(present),
+                Path::from(future as u64),
+                InfoContext::from((sc as u8, sp as u8, ap as u8)),
+            ));
+            assert_eq!(recovered.context().seat_count(), 6);
+            assert_eq!(recovered.context().seat_position(), 3);
+            assert_eq!(recovered.context().active_players(), 5);
+            assert_eq!(recovered, info);
+        }
+    }
+
+    /// RPM-05 AC: calling V1 rows() on a V2 profile panics.
+    #[test]
+    #[should_panic(expected = "rows() requires V1 profile")]
+    fn test_mismatched_info_version_rejected_at_hydrate() {
+        let mut profile = NlheProfile::for_players(6);
+        let info = Info::from((
+            Path::default(),
+            Abstraction::from(1_i16),
+            Path::from(vec![Edge::Check]),
+            InfoContext::from((6, 0, 6)),
+        ));
+        let mut memory = BTreeMap::new();
+        memory.insert(Edge::Check, (1.0, 0.0));
+        profile.encounters.insert(info, memory);
+        // V2 profile must not use V1 serialization — this must panic
+        let _rows: Vec<_> = profile.rows().collect();
     }
 }
 
@@ -386,7 +479,9 @@ impl crate::save::Disk for NlheProfile {
             encounters,
             iterations: 0,
             metrics: Metrics::default(),
-            player_count: 2, // Default to heads-up for disk loading
+            player_count: 2,
+            #[cfg(feature = "server")]
+            info_version: InfoVersion::V1,
         }
     }
     fn save(&self) {

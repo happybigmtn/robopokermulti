@@ -11,6 +11,20 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use serde_json;
 
+/// Blueprint persistence schema version.
+///
+/// V1 is the legacy heads-up schema: blueprint key is `(past, present, future, edge)`.
+/// V2 is the context-aware schema: blueprint key includes
+/// `(past, present, future, seat_count, seat_position, active_players, edge)`.
+///
+/// Mixed V1 and V2 artifacts must not silently co-exist under the same
+/// profile/version namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoVersion {
+    V1,
+    V2,
+}
+
 #[rustfmt::skip]
 pub const ABSTRACTION: &str = "abstraction";
 #[rustfmt::skip]
@@ -98,6 +112,16 @@ impl ProfileTables {
     /// Check if this is the default heads-up profile (no suffix).
     pub fn is_default_hu(&self) -> bool {
         self.profile_key.is_empty()
+    }
+
+    /// Returns the info version for this profile's persistence schema.
+    /// Default HU uses V1 (4-column key); named profiles use V2 (7-column key with context).
+    pub fn info_version(&self) -> InfoVersion {
+        if self.is_default_hu() {
+            InfoVersion::V1
+        } else {
+            InfoVersion::V2
+        }
     }
 }
 
@@ -754,5 +778,18 @@ mod tests {
         assert!(matches!(config_a.small_blind, 1 | 2));
         assert!(matches!(config_a.big_blind, 2 | 4));
         assert!(config_a.starting_stack >= 20 * config_a.big_blind);
+    }
+
+    // ----- InfoVersion Tests -----
+
+    #[test]
+    fn default_hu_profile_is_v1() {
+        assert_eq!(ProfileTables::default_hu().info_version(), InfoVersion::V1);
+    }
+
+    #[test]
+    fn named_profile_is_v2() {
+        let tables = ProfileTables::new("bp_6max_cash");
+        assert_eq!(tables.info_version(), InfoVersion::V2);
     }
 }

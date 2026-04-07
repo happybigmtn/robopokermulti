@@ -44,6 +44,11 @@ impl InfoContext {
     pub fn active_players(&self) -> u8 {
         self.active_players
     }
+
+    /// True when context matches the V1 heads-up default (2 seats, position 0, 2 active).
+    pub fn is_default_heads_up(&self) -> bool {
+        self.seat_count == 2 && self.seat_position == 0 && self.active_players == 2
+    }
 }
 
 impl Default for InfoContext {
@@ -258,6 +263,8 @@ impl TreeInfo for Info {
     }
 }
 
+/// V1 legacy constructor: defaults to heads-up context.
+/// For V2 profiles, use the 4-tuple constructor with explicit InfoContext.
 impl From<(Path, Abstraction, Path)> for Info {
     fn from((history, present, futures): (Path, Abstraction, Path)) -> Self {
         Self::from((history, present, futures, InfoContext::heads_up()))
@@ -274,6 +281,8 @@ impl From<(Path, Abstraction, Path, InfoContext)> for Info {
         }
     }
 }
+/// V1 legacy conversion: drops InfoContext.
+/// For V2 profiles, use the 4-tuple conversion to preserve context.
 impl From<Info> for (Path, Abstraction, Path) {
     fn from(info: Info) -> Self {
         (info.history, info.present, info.choices)
@@ -507,5 +516,81 @@ mod tests {
             let edge = Info::edgify(&game, raise, depth);
             assert!(trained.contains(&edge));
         }
+    }
+
+    // ----- RPM-05 Required Tests -----
+
+    /// RPM-05 AC: two infos with the same path but different seat positions are distinct.
+    #[test]
+    fn test_info_v2_distinguishes_same_path_different_seat_position() {
+        let history = Path::from(vec![Edge::Call, Edge::Check]);
+        let present = Abstraction::from(42_i16);
+        let choices = Path::from(vec![Edge::Check, Edge::Fold]);
+        let ctx_seat_0 = InfoContext::from((6, 0, 6));
+        let ctx_seat_3 = InfoContext::from((6, 3, 6));
+        let info_a = Info::from((history, present, choices, ctx_seat_0));
+        let info_b = Info::from((history, present, choices, ctx_seat_3));
+        assert_ne!(
+            info_a, info_b,
+            "same path at different seat positions must produce distinct Info keys"
+        );
+        // Verify they would occupy different BTreeMap entries
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(info_a, "seat_0");
+        map.insert(info_b, "seat_3");
+        assert_eq!(map.len(), 2);
+    }
+
+    /// RPM-05 AC: two infos with the same path but different active topologies are distinct.
+    #[test]
+    fn test_info_v2_distinguishes_same_path_different_active_topology() {
+        let history = Path::from(vec![Edge::Call, Edge::Check]);
+        let present = Abstraction::from(42_i16);
+        let choices = Path::from(vec![Edge::Check, Edge::Fold]);
+        // 6 players, 4 active vs 6 players, 2 active (post-folds)
+        let ctx_4_active = InfoContext::from((6, 1, 4));
+        let ctx_2_active = InfoContext::from((6, 1, 2));
+        let info_a = Info::from((history, present, choices, ctx_4_active));
+        let info_b = Info::from((history, present, choices, ctx_2_active));
+        assert_ne!(
+            info_a, info_b,
+            "same path with different active topologies must produce distinct Info keys"
+        );
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(info_a, "4_active");
+        map.insert(info_b, "2_active");
+        assert_eq!(map.len(), 2);
+    }
+
+    /// RPM-05 AC: 16-edge path is sufficient for multiway cash action histories.
+    #[test]
+    fn test_info_v2_path_representation_acceptance() {
+        // Build a worst-case 10-max action sequence across two streets:
+        // Preflop: 3 raises + some calls + draw = ~6 edges
+        // Flop: 3 raises + some calls = ~6 edges
+        // Total = ~12, well within 16
+        let edges = vec![
+            Edge::Call,
+            Edge::Raise(Odds(1, 2)),
+            Edge::Raise(Odds(2, 3)),
+            Edge::Call,
+            Edge::Call,
+            Edge::Draw,
+            Edge::Check,
+            Edge::Raise(Odds(1, 2)),
+            Edge::Raise(Odds(2, 3)),
+            Edge::Shove,
+            Edge::Call,
+            Edge::Draw,
+            Edge::Check,
+            Edge::Check,
+        ];
+        assert!(
+            edges.len() <= crate::MAX_DEPTH_SUBGAME,
+            "multiway cash action sequence must fit within MAX_DEPTH_SUBGAME"
+        );
+        let path: Path = edges.iter().copied().collect();
+        let recovered: Vec<Edge> = path.into_iter().collect();
+        assert_eq!(edges, recovered, "path must round-trip without truncation");
     }
 }

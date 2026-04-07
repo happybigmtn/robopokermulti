@@ -3,6 +3,11 @@ mod tables;
 #[cfg(feature = "server")]
 pub use tables::*;
 
+#[cfg(feature = "server")]
+mod gate;
+#[cfg(feature = "server")]
+pub use gate::*;
+
 #[cfg(feature = "database")]
 mod postgres;
 #[cfg(feature = "database")]

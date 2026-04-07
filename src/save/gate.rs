@@ -765,4 +765,119 @@ mod tests {
         pass_attempt.notes = "OOM during clustering at 10-max".to_string();
         assert!(pass_attempt.validate().is_ok());
     }
+
+    // --- RPM-12 spec-required tests ---
+
+    #[test]
+    fn test_tournament_profile_uses_payout_curve_utility() {
+        let raw = serde_json::json!({
+            "player_count": 6,
+            "format": "tournament",
+            "abstraction_version": "abs_v4_p6",
+            "blind_schedule": [
+                { "sb": 1, "bb": 2, "ante": 0, "duration": 20 },
+                { "sb": 2, "bb": 4, "ante": 1, "duration": 10 }
+            ],
+            "stack_bb_range": [20, 50],
+            "payout_curve": [0.50, 0.25, 0.15, 0.10]
+        });
+        let config = TrainingProfileConfig::from_json(&raw.to_string()).unwrap();
+        let payout = config.tournament_payout().expect("payout curve resolved");
+
+        assert_eq!(payout.payouts().len(), 4);
+        let sum: f32 = payout.payouts().iter().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "payouts must normalize to 1.0");
+
+        // Cash profiles do not produce tournament payouts
+        let cash_raw = serde_json::json!({
+            "player_count": 6,
+            "format": "cash",
+            "abstraction_version": "abs_v4_p6",
+            "blinds": "1/2",
+            "stack_bb": 50
+        });
+        let cash_config = TrainingProfileConfig::from_json(&cash_raw.to_string()).unwrap();
+        assert!(cash_config.tournament_payout().is_none());
+    }
+
+    #[test]
+    fn test_tournament_utility_training_uses_profile_metadata() {
+        let tables = TrainingTables::new("bp_6max_tourney", "abs_v4_p6");
+
+        // Tournament training profile uses V2 schema and profile-scoped tables
+        assert!(!tables.profile.is_default_hu());
+        assert!(!tables.abstraction.is_default_v1());
+        assert_eq!(tables.profile.info_version(), InfoVersion::V2);
+        assert_eq!(tables.profile.blueprint(), "blueprint_bp_6max_tourney");
+        assert_eq!(tables.abstraction.isomorphism(), "isomorphism_abs_v4_p6");
+
+        // Tournament profile config resolves blind schedule for training
+        let raw = serde_json::json!({
+            "player_count": 6,
+            "format": "tournament",
+            "abstraction_version": "abs_v4_p6",
+            "blind_schedule": [
+                { "sb": 1, "bb": 2, "ante": 0, "weight": 3.0 },
+                { "sb": 2, "bb": 4, "ante": 1, "weight": 2.0 },
+                { "sb": 5, "bb": 10, "ante": 2, "weight": 1.0 }
+            ],
+            "stack_bb_range": [15, 40],
+            "payout_curve": [0.5, 0.3, 0.2]
+        });
+        let config = TrainingProfileConfig::from_json(&raw.to_string()).unwrap();
+        assert_eq!(config.format(), TrainingFormat::Tournament);
+        assert_eq!(config.resolved_schedule().len(), 3);
+
+        // Deterministic epoch sampling
+        let tc_a = config.table_config_for_epoch(42);
+        let tc_b = config.table_config_for_epoch(42);
+        assert_eq!(tc_a, tc_b);
+        assert_eq!(tc_a.seat_count, 6);
+    }
+
+    #[test]
+    fn test_tournament_utility_docs_exclude_full_lifecycle_claims() {
+        // Tournament profile config rejects configs without blind_schedule
+        let no_schedule = serde_json::json!({
+            "player_count": 3,
+            "format": "tournament",
+            "abstraction_version": "abs_v4_p3",
+            "payout_curve": [0.6, 0.3, 0.1]
+        });
+        let err = TrainingProfileConfig::from_json(&no_schedule.to_string()).unwrap_err();
+        assert!(
+            err.contains("blind_schedule"),
+            "tournament requires explicit schedule, got: {}",
+            err
+        );
+
+        // Tournament profile rejects payout_curve longer than player_count
+        let over_payout = serde_json::json!({
+            "player_count": 2,
+            "format": "tournament",
+            "abstraction_version": "abs_v4_p2",
+            "blind_schedule": [{ "sb": 1, "bb": 2, "ante": 0 }],
+            "payout_curve": [0.5, 0.3, 0.2]
+        });
+        let err = TrainingProfileConfig::from_json(&over_payout.to_string()).unwrap_err();
+        assert!(
+            err.contains("payout_curve"),
+            "payout cannot exceed player count, got: {}",
+            err
+        );
+
+        // Tournament config without payout_curve is rejected
+        let no_payout = serde_json::json!({
+            "player_count": 3,
+            "format": "tournament",
+            "abstraction_version": "abs_v4_p3",
+            "blind_schedule": [{ "sb": 1, "bb": 2, "ante": 0 }]
+        });
+        let err = TrainingProfileConfig::from_json(&no_payout.to_string()).unwrap_err();
+        assert!(
+            err.contains("payout_curve"),
+            "tournament requires payout_curve, got: {}",
+            err
+        );
+    }
 }

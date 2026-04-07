@@ -30,24 +30,30 @@ pub struct Room {
 
 impl Default for Room {
     fn default() -> Self {
+        Self::with_config(TableConfig::heads_up())
+    }
+}
+
+impl Room {
+    pub fn with_config(config: TableConfig) -> Self {
         Self {
-            game: Game::root(),
+            game: Game::root_with_config(config),
             channel: Channel::default(),
             players: Vec::new(),
             history: Vec::new(),
         }
     }
-}
 
-impl Room {
     pub async fn run(mut self) -> ! {
         loop {
             if self.history.is_empty() {
-                self.game()
-                    .seats()
+                let seats = self.game().seats();
+                seats
                     .iter()
+                    .take(self.game().seat_count())
                     .enumerate()
                     .for_each(|(i, seat)| self.unicast(i, Event::ShowHand(i, seat.cards())));
+                self.broadcast(Event::TableState(self.public_state()));
             }
             match self.game().turn() {
                 Turn::Chance => self.next_card().await,
@@ -74,21 +80,24 @@ impl Room {
         let action = self.ask(pos).await;
         self.apply(action);
         self.broadcast(Event::Play(action));
+        self.broadcast(Event::TableState(self.public_state()));
     }
 
     async fn next_card(&mut self) {
         let reveal = self.game().reveal();
         self.apply(reveal);
         self.broadcast(Event::Play(reveal));
+        self.broadcast(Event::TableState(self.public_state()));
     }
 
     async fn next_hand(&mut self) {
+        let config = self.game().config();
         self.game = self
             .game
             .next()
             .ok_or_else(|| anyhow::anyhow!("no next hand available, restarting"))
             .inspect_err(|e| log::warn!("{}", e))
-            .unwrap_or_else(|_| Game::root());
+            .unwrap_or_else(|_| Game::root_with_config(config));
         self.history.clear();
     }
 }
@@ -116,14 +125,46 @@ impl Room {
     }
 
     fn recall(&self, pos: usize) -> Recall {
-        Recall::from((
+        Recall::from_actions_with_config(
             Turn::Choice(pos),
             Observation::from((
                 Hand::from(self.game().seats().get(pos).expect("bounds").cards()),
                 Hand::from(self.game().board()),
             )),
             self.history.clone(),
-        ))
+            self.game().config(),
+        )
+    }
+
+    fn public_state(&self) -> PublicState {
+        let game = self.game();
+        let seats = game.seats();
+        let seats = seats
+            .iter()
+            .take(game.seat_count())
+            .enumerate()
+            .map(|(index, seat)| PublicSeat {
+                index,
+                stack: seat.stack(),
+                stake: seat.stake(),
+                spent: seat.spent(),
+                state: seat.state(),
+            })
+            .collect::<Vec<_>>();
+        let actor = match game.turn() {
+            Turn::Choice(index) => Some(index),
+            Turn::Chance | Turn::Terminal => None,
+        };
+
+        PublicState {
+            street: game.street(),
+            board: Vec::<Card>::from(Hand::from(game.board())),
+            pot: game.pot(),
+            seat_count: game.seat_count(),
+            active_players: game.active_player_count(),
+            actor,
+            seats,
+        }
     }
 }
 
@@ -153,5 +194,34 @@ impl Room {
     }
     fn game(&self) -> &Game {
         &self.game
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_config_preserves_table_config_in_recall() {
+        let config = TableConfig::for_players(4)
+            .with_blinds(2, 4)
+            .with_ante(1)
+            .with_stack(200);
+        let room = Room::with_config(config);
+
+        let recall = room.recall(0);
+
+        assert_eq!(recall.config(), Some(&config));
+    }
+
+    #[test]
+    fn public_state_uses_active_seat_count() {
+        let room = Room::with_config(TableConfig::for_players(4));
+
+        let state = room.public_state();
+
+        assert_eq!(state.seat_count, 4);
+        assert_eq!(state.seats.len(), 4);
+        assert_eq!(state.active_players, 4);
     }
 }

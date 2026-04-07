@@ -107,6 +107,23 @@ impl Recall {
     pub fn set_reveals(&mut self, obs: Observation) {
         self.reveals = Arrangement::from(obs);
     }
+
+    /// Create recall history with an explicit table configuration.
+    ///
+    /// The provided actions are post-posting actions. The config-specific
+    /// posting prefix (antes + blinds) is inserted automatically.
+    pub fn from_actions_with_config(
+        pov: Turn,
+        seen: Observation,
+        actions: Vec<Action>,
+        config: TableConfig,
+    ) -> Self {
+        let mut recall = Self::with_config(config);
+        recall.set_pov(pov);
+        recall.set_reveals(seen);
+        recall.actions.extend(actions);
+        recall
+    }
 }
 
 impl Recall {
@@ -858,5 +875,24 @@ mod tests {
         // Posting prefix should be correct (2 antes + SB + BB = 4)
         assert_eq!(r_reset.posting_prefix_len(), 4);
         assert_eq!(r_reset.actions().len(), 4);
+    }
+
+    #[test]
+    fn from_actions_with_config_adds_configured_posting_prefix() {
+        let config = TableConfig::for_players(3).with_blinds(2, 5).with_ante(1);
+        let recall = Recall::from_actions_with_config(
+            Turn::Choice(0),
+            Observation::from(Street::Pref),
+            vec![Action::Call(5)],
+            config,
+        );
+        assert_eq!(recall.config(), Some(&config));
+        assert_eq!(recall.actions().len(), 6);
+        assert_eq!(recall.actions()[0], Action::Blind(1));
+        assert_eq!(recall.actions()[1], Action::Blind(1));
+        assert_eq!(recall.actions()[2], Action::Blind(1));
+        assert_eq!(recall.actions()[3], Action::Blind(2));
+        assert_eq!(recall.actions()[4], Action::Blind(5));
+        assert_eq!(recall.actions()[5], Action::Call(5));
     }
 }

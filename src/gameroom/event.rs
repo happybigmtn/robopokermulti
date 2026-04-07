@@ -7,9 +7,30 @@ use crate::gameplay::*;
 #[derive(Clone, Debug)]
 pub enum Event {
     Play(Action),
+    TableState(PublicState),
     NextHand(usize, Meta),
     ShowHand(usize, Hole),
     YourTurn(Recall),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicState {
+    pub street: Street,
+    pub board: Vec<Card>,
+    pub pot: Chips,
+    pub seat_count: usize,
+    pub active_players: usize,
+    pub actor: Option<usize>,
+    pub seats: Vec<PublicSeat>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicSeat {
+    pub index: usize,
+    pub stack: Chips,
+    pub stake: Chips,
+    pub spent: Chips,
+    pub state: State,
 }
 
 /// Meta-actions for table and player management.

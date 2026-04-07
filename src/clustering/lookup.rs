@@ -1,3 +1,4 @@
+use crate::Probability;
 use crate::cards::*;
 use crate::clustering::*;
 use crate::gameplay::*;
@@ -59,19 +60,145 @@ impl Lookup {
     }
 }
 
-fn versioned_seat_count() -> u8 {
-    if let Ok(value) = std::env::var("POSITION_AWARE_SEATS") {
-        if let Ok(count) = value.parse::<u8>() {
-            if count >= 2 {
-                return count;
-            }
-        }
+fn versioned_seat_count(tables: &crate::save::AbstractionTables) -> u8 {
+    tables
+        .player_count()
+        .expect("versioned abstraction tables must use abs_v{generation}_p{seats} with seats >= 2")
+}
+
+fn position_band(seat_position: u8, player_count: u8) -> usize {
+    if player_count <= 3 {
+        return usize::from(seat_position.min(2));
     }
-    std::env::var("PLAYER_COUNT")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .filter(|v| *v >= 2)
-        .expect("versioned abstraction tables require PLAYER_COUNT or POSITION_AWARE_SEATS >= 2")
+    if seat_position == 0 {
+        return 2;
+    }
+    if seat_position <= player_count / 2 {
+        0
+    } else {
+        1
+    }
+}
+
+fn straight_texture(public: Hand) -> usize {
+    let ranks = u16::from(public);
+    let mut bits = ranks;
+    for _ in 0..3 {
+        bits &= bits << 1;
+    }
+    if bits > 0 { 1 } else { 0 }
+}
+
+fn board_texture_band(observation: Observation) -> usize {
+    let public = *observation.public();
+    let max_suit = Suit::all()
+        .into_iter()
+        .map(|suit| public.of(&suit).size())
+        .max()
+        .unwrap_or(0);
+    let rank_bits = u16::from(public);
+    let paired = public
+        .size()
+        .saturating_sub(rank_bits.count_ones() as usize);
+    match (max_suit, paired, straight_texture(public)) {
+        (4.., _, _) => 4,
+        (_, 2.., _) => 3,
+        (_, _, 1) => 2,
+        (3, _, _) => 1,
+        _ => 0,
+    }
+}
+
+fn river_rank_band(observation: Observation) -> usize {
+    let ranking = Evaluator::from(Hand::from(observation)).find_ranking();
+    match ranking {
+        Ranking::HighCard(_) => 0,
+        Ranking::OnePair(_) => 1,
+        Ranking::TwoPair(_, _) => 2,
+        Ranking::ThreeOAK(_) => 4,
+        Ranking::Straight(_) => 5,
+        Ranking::Flush(_) => 6,
+        Ranking::FullHouse(_, _) => 7,
+        Ranking::FourOAK(_) => 8,
+        Ranking::StraightFlush(_) => 9,
+        Ranking::MAX => unreachable!("ranking::MAX is not a real river value"),
+    }
+}
+
+fn approximate_multiway_outcome(
+    observation: Observation,
+    player_count: u8,
+) -> (Probability, Probability) {
+    let hand = Hand::from(observation);
+    let hero = Strength::from(hand);
+    let (won, tied, total) = HandIterator::from((2, hand))
+        .map(|villain| Hand::add(*observation.public(), villain))
+        .map(|villain| Strength::from(villain))
+        .map(|villain| hero.cmp(&villain))
+        .fold((0_u32, 0_u32, 0_u32), |(won, tied, total), ord| match ord {
+            std::cmp::Ordering::Greater => (won + 1, tied, total + 1),
+            std::cmp::Ordering::Equal => (won, tied + 1, total + 1),
+            std::cmp::Ordering::Less => (won, tied, total + 1),
+        });
+    if total == 0 {
+        return (0.5, 0.0);
+    }
+
+    let opponents = i32::from(player_count.saturating_sub(1));
+    let heads_up_win = won as Probability / total as Probability;
+    let heads_up_tie = tied as Probability / total as Probability;
+    let multiway_win = heads_up_win.powi(opponents);
+    let multiway_tie = (heads_up_win + heads_up_tie).powi(opponents) - multiway_win;
+    (multiway_win.clamp(0.0, 1.0), multiway_tie.clamp(0.0, 1.0))
+}
+
+fn river_strength_band(observation: Observation, player_count: u8) -> usize {
+    let rank_band = river_rank_band(observation) as Probability / 9.0;
+    let (multiway_win, multiway_tie) = approximate_multiway_outcome(observation, player_count);
+    let blended = (0.7 * multiway_win) + (0.2 * multiway_tie) + (0.1 * rank_band);
+    (blended.clamp(0.0, 0.999_999) * 10.0).floor() as usize
+}
+
+fn river_abstraction_for_version(
+    observation: Observation,
+    seat_position: u8,
+    parsed: crate::save::ParsedAbstractionVersion,
+) -> Abstraction {
+    let position = position_band(seat_position, parsed.player_count());
+    let texture = board_texture_band(observation);
+    let strength = river_strength_band(observation, parsed.player_count());
+    let index = (position * 50) + (texture * 10) + strength;
+    debug_assert!(index < crate::KMEANS_EQTY_CLUSTER_COUNT);
+    Abstraction::from((Street::Rive, index))
+}
+
+fn versioned_lookup_rows(
+    lookup: &Lookup,
+    tables: &crate::save::AbstractionTables,
+) -> Vec<(i64, i16, i16)> {
+    let seat_count = versioned_seat_count(tables);
+    let parsed = tables.parsed_version();
+    lookup
+        .0
+        .iter()
+        .flat_map(|(iso, abs)| {
+            let iso = *iso;
+            let abs = *abs;
+            (0..seat_count).map(move |seat| {
+                let resolved =
+                    if iso.0.street() == Street::Rive && tables.uses_multiway_v4_bucketing() {
+                        river_abstraction_for_version(
+                            iso.0,
+                            seat,
+                            parsed.expect("v4 abstractions must parse their version contract"),
+                        )
+                    } else {
+                        abs
+                    };
+                (i64::from(iso), i16::from(resolved), i16::from(seat))
+            })
+        })
+        .collect()
 }
 
 #[cfg(feature = "database")]
@@ -169,7 +296,7 @@ impl Lookup {
         let seat_count = if tables.is_default_v1() {
             None
         } else {
-            Some(versioned_seat_count())
+            Some(versioned_seat_count(tables))
         };
         let position_aware = !tables.is_default_v1();
         let copy = if position_aware {
@@ -196,27 +323,24 @@ impl Lookup {
         let mut total: usize = 0;
         let mut in_chunk: usize = 0;
 
-        if let Some(seat_count) = seat_count {
-            for row in self.rows() {
-                let (obs, abs) = row;
-                for seat in 0..seat_count {
-                    (obs, abs, seat as i16).write(writer.as_mut()).await;
-                    total += 1;
-                    in_chunk += 1;
+        if seat_count.is_some() {
+            for row in versioned_lookup_rows(&self, tables) {
+                row.write(writer.as_mut()).await;
+                total += 1;
+                in_chunk += 1;
 
-                    if in_chunk >= chunk_size {
-                        writer.as_mut().finish().await.expect("finish");
-                        log::info!(
-                            "~ lookup copy: committed {} rows (total {})",
-                            in_chunk,
-                            total
-                        );
-                        writer = Box::pin({
-                            let sink = client.copy_in(&copy).await.expect("copy_in");
-                            BinaryCopyInWriter::new(sink, &columns)
-                        });
-                        in_chunk = 0;
-                    }
+                if in_chunk >= chunk_size {
+                    writer.as_mut().finish().await.expect("finish");
+                    log::info!(
+                        "~ lookup copy: committed {} rows (total {})",
+                        in_chunk,
+                        total
+                    );
+                    writer = Box::pin({
+                        let sink = client.copy_in(&copy).await.expect("copy_in");
+                        BinaryCopyInWriter::new(sink, &columns)
+                    });
+                    in_chunk = 0;
                 }
             }
         } else {
@@ -268,8 +392,9 @@ impl Lookup {
         let seat_count = if tables.is_default_v1() {
             None
         } else {
-            Some(versioned_seat_count())
+            Some(versioned_seat_count(tables))
         };
+        let parsed = tables.parsed_version();
         let position_aware = !tables.is_default_v1();
         let copy = if position_aware {
             format!("COPY {isomorphism} (obs, abs, seat_position) FROM STDIN BINARY")
@@ -309,8 +434,18 @@ impl Lookup {
 
         while let Some(row) = rx.recv().await {
             if let Some(seat_count) = seat_count {
+                let observation = Isomorphism::from(row.0).0;
                 for seat in 0..seat_count {
-                    (row.0, row.1, seat as i16).write(writer.as_mut()).await;
+                    let abs = if tables.uses_multiway_v4_bucketing() {
+                        i16::from(river_abstraction_for_version(
+                            observation,
+                            seat,
+                            parsed.expect("v4 abstractions must parse their version contract"),
+                        ))
+                    } else {
+                        row.1
+                    };
+                    (row.0, abs, seat as i16).write(writer.as_mut()).await;
                     total += 1;
                     in_chunk += 1;
 
@@ -413,6 +548,100 @@ impl Lookup {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn river_observation() -> Observation {
+        Observation::try_from("Ah Qd ~ Jc Ts 8c 4d 2h").expect("river observation")
+    }
+
+    #[test]
+    fn test_multiway_river_bucket_distinguishes_seat_position() {
+        let parsed = crate::save::AbstractionTables::new("abs_v4_p6")
+            .parsed_version()
+            .expect("parsed version");
+        let observation = river_observation();
+
+        let button = river_abstraction_for_version(observation, 0, parsed);
+        let middle = river_abstraction_for_version(observation, 3, parsed);
+
+        assert_ne!(button, middle);
+    }
+
+    #[test]
+    fn test_multiway_river_bucket_distinguishes_active_player_count() {
+        let observation = river_observation();
+        let three_handed = crate::save::AbstractionTables::new("abs_v4_p3")
+            .parsed_version()
+            .expect("parsed version");
+        let six_handed = crate::save::AbstractionTables::new("abs_v4_p6")
+            .parsed_version()
+            .expect("parsed version");
+
+        let short_handed = river_abstraction_for_version(observation, 1, three_handed);
+        let full_ring = river_abstraction_for_version(observation, 1, six_handed);
+
+        assert_ne!(short_handed, full_ring);
+    }
+
+    #[test]
+    fn test_clustered_rows_are_seat_conditioned() {
+        let tables = crate::save::AbstractionTables::new("abs_v4_p4");
+        let iso = Isomorphism::from(river_observation());
+        let lookup = Lookup::from(BTreeMap::from([(iso, Abstraction::from(iso.0.equity()))]));
+
+        let rows = versioned_lookup_rows(&lookup, &tables);
+
+        assert_eq!(rows.len(), 4);
+        let seat_zero_abs = rows[0].1;
+        assert!(rows.iter().any(|row| row.1 != seat_zero_abs));
+    }
+
+    #[test]
+    fn test_legacy_env_flag_does_not_change_v4_meaning() {
+        let _guard = env_lock().lock().expect("env lock");
+        let previous = std::env::var("POSITION_AWARE_SEATS").ok();
+        unsafe {
+            std::env::set_var("POSITION_AWARE_SEATS", "9");
+        }
+
+        let tables = crate::save::AbstractionTables::new("abs_v4_p3");
+        let seat_count = versioned_seat_count(&tables);
+
+        match previous {
+            Some(value) => unsafe {
+                std::env::set_var("POSITION_AWARE_SEATS", value);
+            },
+            None => unsafe {
+                std::env::remove_var("POSITION_AWARE_SEATS");
+            },
+        }
+
+        assert_eq!(seat_count, 3);
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "disk")]
+    fn persistence() {
+        let street = Street::Pref;
+        let lookup = Lookup::grow(street);
+        lookup.save();
+        let loaded = Lookup::load(street);
+        std::iter::empty()
+            .chain(lookup.0.iter().zip(loaded.0.iter()))
+            .chain(loaded.0.iter().zip(lookup.0.iter()))
+            .all(|((s1, l1), (s2, l2))| s1 == s2 && l1 == l2);
+    }
+}
+
 impl Lookup {
     /// abstractions for River are calculated once via obs.equity
     /// abstractions for Preflop are equivalent to just enumerating isomorphisms
@@ -503,25 +732,5 @@ impl crate::save::Disk for Lookup {
             file.write_i16::<BE>(i16::from(*abs)).unwrap();
         }
         file.write_u16::<BE>(Self::footer()).expect("trailer");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    #[ignore]
-    #[cfg(feature = "disk")]
-    fn persistence() {
-        use crate::cards::*;
-        use crate::clustering::*;
-        use crate::save::*;
-        let street = Street::Pref;
-        let lookup = Lookup::grow(street);
-        lookup.save();
-        let loaded = Lookup::load(street);
-        std::iter::empty()
-            .chain(lookup.0.iter().zip(loaded.0.iter()))
-            .chain(loaded.0.iter().zip(lookup.0.iter()))
-            .all(|((s1, l1), (s2, l2))| s1 == s2 && l1 == l2);
     }
 }

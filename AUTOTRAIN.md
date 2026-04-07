@@ -54,7 +54,7 @@ Use profile-aware tables for 3–10 seat runs. This lets you run multiple profil
 Conventions that match current logs/examples:
 
 - `PROFILE_KEY`: `bp_<seats>max_local` (e.g., `bp_3max_local`)
-- `ABSTRACTION_VERSION`: `abs_v3_p<seats>` (e.g., `abs_v3_p3`)
+- `ABSTRACTION_VERSION`: `abs_v4_p<seats>` (e.g., `abs_v4_p3`)
 - `PLAYER_COUNT`: `3`..`10`
 
 ### 2) Set environment
@@ -62,12 +62,8 @@ Conventions that match current logs/examples:
 ```bash
 export DB_URL="postgres://robopoker:pass@localhost:54329/robopoker"
 export PROFILE_KEY=bp_3max_local
-export ABSTRACTION_VERSION=abs_v3_p3
+export ABSTRACTION_VERSION=abs_v4_p3
 export PLAYER_COUNT=3
-# Position-aware multiway (optional)
-export POSITION_AWARE=1
-# Optional override if PLAYER_COUNT is not set
-# export POSITION_AWARE_SEATS=3
 ```
 
 ### 2b) Pin local CPU usage (optional)
@@ -117,10 +113,8 @@ Defaults for the position-aware N=4 wrapper (ccx33-friendly):
 
 ```
 PROFILE_KEY=bp_4max_local
-ABSTRACTION_VERSION=abs_v3_p4
+ABSTRACTION_VERSION=abs_v4_p4
 PLAYER_COUNT=4
-POSITION_AWARE=1
-POSITION_AWARE_SEATS=4
 RAYON_NUM_THREADS=8
 ```
 
@@ -129,9 +123,8 @@ The script uses the same env vars as above and defaults to:
 ```
 DB_URL=postgres://robopoker:pass@localhost:54329/robopoker
 PROFILE_KEY=bp_3max_local
-ABSTRACTION_VERSION=abs_v3_p3
+ABSTRACTION_VERSION=abs_v4_p3
 PLAYER_COUNT=3
-POSITION_AWARE=0
 RAYON_NUM_THREADS=18
 CLUSTER_COPY_CHUNK=250000
 RIVER_COPY_CHUNK=250000
@@ -168,7 +161,7 @@ cargo run --bin trainer --features server -- --slow
 - **Resume behavior:** `--cluster` checks existing `isomorphism_<abstraction_version>` rows per street and skips streets already complete.
 - **Logs:** live progress prints in the log (`~ river copy: committed …`, `kmeans hydrating`, `kmeans iterating`).
 - **Tables used:** `blueprint_<profile_key>`, `epoch_<profile_key>`, `isomorphism_<abstraction_version>`, `metric_<abstraction_version>`, `transitions_<abstraction_version>`, `abstraction_<abstraction_version>`.
-- **Position-aware runs:** setting `POSITION_AWARE=1` multiplies isomorphism rows by `PLAYER_COUNT`. Validate on N=4 before scaling to N=10.
+- **Position-aware runs:** `abs_v4_p{n}` derives seat-aware lookup shape from the abstraction version itself. `POSITION_AWARE` / `POSITION_AWARE_SEATS` no longer change v4 clustering meaning.
 
 ---
 
@@ -189,7 +182,7 @@ On `ns-train-1`:
 ```text
 container: trainer-cluster
 PROFILE_KEY=bp_6max_cash_2026_01_14
-ABSTRACTION_VERSION=abs_v3_p6
+ABSTRACTION_VERSION=abs_v4_p6
 PLAYER_COUNT=6
 ```
 
@@ -208,7 +201,7 @@ ssh -i ~/.ssh/hetzner_training root@5.161.67.36 "docker ps --format 'table {{.Na
 ssh -i ~/.ssh/hetzner_training root@5.161.67.36
 export DB_URL="postgres://robopoker:<password>@5.161.124.82:5432/robopoker_training"
 export PROFILE_KEY=<profile_key>           # e.g., bp_6max_cash (replace with actual)
-export ABSTRACTION_VERSION=<abs_version>   # e.g., abs_v3_p6 (replace with actual)
+export ABSTRACTION_VERSION=<abs_version>   # e.g., abs_v4_p6 (replace with actual)
 export PLAYER_COUNT=6
 export RAYON_NUM_THREADS=18
 
@@ -248,10 +241,8 @@ Recommended runtime settings:
 
 ```
 PROFILE_KEY=bp_4max_cash_2026_01_15
-ABSTRACTION_VERSION=abs_v3_p4
+ABSTRACTION_VERSION=abs_v4_p4
 PLAYER_COUNT=4
-POSITION_AWARE=1
-POSITION_AWARE_SEATS=4
 RAYON_NUM_THREADS=8
 CLUSTER_COPY_CHUNK=250000
 RIVER_COPY_CHUNK=250000
@@ -270,10 +261,8 @@ ssh -i ~/.ssh/hetzner_training root@178.156.214.100
 docker run -d --name trainer-cluster \
   --env-file /opt/robopoker/robopoker.env \
   -e PROFILE_KEY=bp_4max_cash_2026_01_15 \
-  -e ABSTRACTION_VERSION=abs_v3_p4 \
+  -e ABSTRACTION_VERSION=abs_v4_p4 \
   -e PLAYER_COUNT=4 \
-  -e POSITION_AWARE=1 \
-  -e POSITION_AWARE_SEATS=4 \
   -e RAYON_NUM_THREADS=8 \
   -e CLUSTER_COPY_CHUNK=250000 \
   -e RIVER_COPY_CHUNK=250000 \

@@ -124,6 +124,26 @@ pub struct AbstractionTables {
     abstraction_version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParsedAbstractionVersion {
+    generation: u8,
+    player_count: u8,
+}
+
+impl ParsedAbstractionVersion {
+    pub const fn generation(&self) -> u8 {
+        self.generation
+    }
+
+    pub const fn player_count(&self) -> u8 {
+        self.player_count
+    }
+
+    pub const fn is_v4_or_newer(&self) -> bool {
+        self.generation >= 4
+    }
+}
+
 impl AbstractionTables {
     /// Create a new abstraction table set from a version identifier.
     ///
@@ -150,6 +170,39 @@ impl AbstractionTables {
     /// Returns the abstraction version.
     pub fn abstraction_version(&self) -> &str {
         &self.abstraction_version
+    }
+
+    /// Parse `abs_v{generation}_p{player_count}` when this table set is versioned.
+    pub fn parsed_version(&self) -> Option<ParsedAbstractionVersion> {
+        if self.is_default_v1() {
+            return None;
+        }
+
+        let (prefix, player_count) = self.abstraction_version.rsplit_once("_p")?;
+        let generation = prefix.strip_prefix("abs_v")?;
+        let generation = generation.parse::<u8>().ok()?;
+        let player_count = player_count.parse::<u8>().ok()?;
+        if generation == 0 || player_count < 2 {
+            return None;
+        }
+
+        Some(ParsedAbstractionVersion {
+            generation,
+            player_count,
+        })
+    }
+
+    pub fn player_count(&self) -> Option<u8> {
+        self.parsed_version().map(|parsed| parsed.player_count())
+    }
+
+    pub fn uses_exact_seat_lookup(&self) -> bool {
+        !self.is_default_v1()
+    }
+
+    pub fn uses_multiway_v4_bucketing(&self) -> bool {
+        self.parsed_version()
+            .is_some_and(|parsed| parsed.is_v4_or_newer())
     }
 
     /// Returns the abstraction table name: `abstraction_<version>`.
@@ -632,6 +685,27 @@ mod tests {
         assert_ne!(v2.isomorphism(), v3.isomorphism());
         assert_ne!(v2.abstraction(), v3.abstraction());
         assert_ne!(v2.metric(), v3.metric());
+    }
+
+    #[test]
+    fn abstraction_tables_parse_generation_and_player_count() {
+        let tables = AbstractionTables::new("abs_v4_p6");
+        let parsed = tables.parsed_version().expect("parsed version");
+
+        assert_eq!(parsed.generation(), 4);
+        assert_eq!(parsed.player_count(), 6);
+        assert_eq!(tables.player_count(), Some(6));
+        assert!(tables.uses_exact_seat_lookup());
+        assert!(tables.uses_multiway_v4_bucketing());
+    }
+
+    #[test]
+    fn abstraction_tables_reject_invalid_version_contract() {
+        let tables = AbstractionTables::new("abs_versioned");
+
+        assert_eq!(tables.parsed_version(), None);
+        assert_eq!(tables.player_count(), None);
+        assert!(!tables.uses_multiway_v4_bucketing());
     }
 
     #[test]

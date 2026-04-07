@@ -168,16 +168,16 @@ chat history.
 
 - `Task 9` in progress:
   - canonical 3-max profile: `bp_3max_local`
-  - abstraction version: `abs_v3_p3`
-  - live clustering target: `isomorphism_abs_v3_p3`
+  - abstraction version: `abs_v4_p3`
+  - live clustering target: `isomorphism_abs_v4_p3`
   - current milestone already proven:
     - profile-aware trainer boot
     - profile table creation
-    - seat-conditioned river COPY ingestion
+    - seat-conditioned river COPY ingestion with version-defined seat lookup
   - current live status at last check:
     - trainer PID `1117989`
     - `target/debug/trainer --cluster`
-    - `104,250,000` rows committed in `isomorphism_abs_v3_p3`
+    - `104,250,000` rows committed in `isomorphism_abs_v4_p3`
 - `Task 6` still open:
   - the abstraction lookup is seat-aware, but blueprint infoset identity is
     still too thin.

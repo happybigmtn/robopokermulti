@@ -7,18 +7,33 @@ use std::collections::BTreeMap;
 
 type NlheTree = Tree<Turn, Edge, Game, Info>;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SeatLookupMode {
+    #[default]
+    LegacyFallback,
+    ExactSeat,
+}
+
 pub struct NlheEncoder {
     lookup: BTreeMap<(Isomorphism, u8), Abstraction>,
+    seat_lookup_mode: SeatLookupMode,
 }
 
 impl NlheEncoder {
     pub fn abstraction(&self, iso: &Isomorphism, seat_position: u8) -> Abstraction {
-        self.lookup
-            .get(&(*iso, seat_position))
-            .or_else(|| self.lookup.get(&(*iso, 0)))
-            .copied()
-            .expect("isomorphism not found in abstraction lookup")
+        match self.seat_lookup_mode {
+            SeatLookupMode::LegacyFallback => self
+                .lookup
+                .get(&(*iso, seat_position))
+                .or_else(|| self.lookup.get(&(*iso, 0)))
+                .copied()
+                .expect("isomorphism not found in abstraction lookup"),
+            SeatLookupMode::ExactSeat => self
+                .lookup
+                .get(&(*iso, seat_position))
+                .copied()
+                .expect("isomorphism not found in abstraction lookup"),
+        }
     }
 
     pub async fn hydrate_profile(
@@ -61,7 +76,15 @@ impl NlheEncoder {
                 })
                 .collect()
         };
-        Self { lookup }
+        let seat_lookup_mode = if tables.abstraction.uses_exact_seat_lookup() {
+            SeatLookupMode::ExactSeat
+        } else {
+            SeatLookupMode::LegacyFallback
+        };
+        Self {
+            lookup,
+            seat_lookup_mode,
+        }
     }
     pub fn choices(game: &Game, depth: usize) -> Vec<Edge> {
         Info::futures(game, depth).into_iter().collect()
@@ -219,6 +242,7 @@ impl crate::save::Disk for NlheEncoder {
                     map.extend(l.into_iter().map(|(iso, abs)| ((iso, 0), abs)));
                     map
                 }),
+            seat_lookup_mode: SeatLookupMode::LegacyFallback,
         }
     }
 }
@@ -228,25 +252,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn abstraction_prefers_exact_seat_position() {
+    fn test_lookup_uses_version_defined_position_behavior() {
         let game = Game::root_with_config(TableConfig::for_players(6));
         let iso = Isomorphism::from(game.sweat());
         let mut lookup = BTreeMap::new();
         lookup.insert((iso, 0), Abstraction::from(3_i16));
         lookup.insert((iso, 2), Abstraction::from(9_i16));
-        let encoder = NlheEncoder { lookup };
+        let encoder = NlheEncoder {
+            lookup,
+            seat_lookup_mode: SeatLookupMode::ExactSeat,
+        };
 
         assert_eq!(encoder.abstraction(&iso, 2), Abstraction::from(9_i16));
     }
 
     #[test]
-    fn abstraction_falls_back_to_seat_zero() {
+    fn legacy_lookup_falls_back_to_seat_zero() {
         let game = Game::root_with_config(TableConfig::for_players(6));
         let iso = Isomorphism::from(game.sweat());
         let mut lookup = BTreeMap::new();
         lookup.insert((iso, 0), Abstraction::from(5_i16));
-        let encoder = NlheEncoder { lookup };
+        let encoder = NlheEncoder {
+            lookup,
+            seat_lookup_mode: SeatLookupMode::LegacyFallback,
+        };
 
         assert_eq!(encoder.abstraction(&iso, 4), Abstraction::from(5_i16));
+    }
+
+    #[test]
+    #[should_panic(expected = "isomorphism not found in abstraction lookup")]
+    fn versioned_lookup_requires_exact_seat_position() {
+        let game = Game::root_with_config(TableConfig::for_players(6));
+        let iso = Isomorphism::from(game.sweat());
+        let mut lookup = BTreeMap::new();
+        lookup.insert((iso, 0), Abstraction::from(5_i16));
+        let encoder = NlheEncoder {
+            lookup,
+            seat_lookup_mode: SeatLookupMode::ExactSeat,
+        };
+
+        let _ = encoder.abstraction(&iso, 4);
     }
 }

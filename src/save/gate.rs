@@ -104,6 +104,24 @@ pub fn canonical_3max_cash_profile() -> (TrainingTables, TrainingProfileConfig) 
     (tables, config)
 }
 
+/// Canonical 6-max cash profile definition for the second validation gate.
+pub fn canonical_6max_cash_profile() -> (TrainingTables, TrainingProfileConfig) {
+    let tables = TrainingTables::new("bp_6max_cash", "abs_v4_p6");
+    let config = TrainingProfileConfig::from_json(
+        &serde_json::json!({
+            "player_count": 6,
+            "format": "cash",
+            "abstraction_version": "abs_v4_p6",
+            "blinds": "1/2",
+            "ante": 0,
+            "stack_bb": 50
+        })
+        .to_string(),
+    )
+    .expect("canonical 6-max cash profile config");
+    (tables, config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,5 +281,105 @@ mod tests {
             notes: "clustering OOM".to_string(),
         };
         assert!(fail_no_bench.validate().is_err());
+    }
+
+    // --- RPM-09 spec-required tests ---
+
+    #[test]
+    fn test_6max_profile_round_trip_gate() {
+        let (tables, config) = canonical_6max_cash_profile();
+
+        assert_eq!(tables.profile.profile_key(), "bp_6max_cash");
+        assert_eq!(tables.abstraction.abstraction_version(), "abs_v4_p6");
+        assert!(!tables.profile.is_default_hu());
+        assert!(!tables.abstraction.is_default_v1());
+        assert_eq!(tables.profile.info_version(), InfoVersion::V2);
+
+        let parsed = tables.abstraction.parsed_version().unwrap();
+        assert_eq!(parsed.player_count(), 6);
+        assert!(parsed.is_v4_or_newer());
+
+        assert_eq!(config.resolved_schedule().len(), 1);
+        let level = &config.resolved_schedule()[0];
+        assert_eq!(level.sb, 1);
+        assert_eq!(level.bb, 2);
+
+        let json = serde_json::json!({
+            "player_count": 6,
+            "format": "cash",
+            "abstraction_version": "abs_v4_p6",
+            "blinds": "1/2",
+            "stack_bb": 50
+        });
+        let roundtrip = TrainingProfileConfig::from_json(&json.to_string()).unwrap();
+        assert_eq!(
+            roundtrip.resolved_schedule().len(),
+            config.resolved_schedule().len()
+        );
+    }
+
+    #[test]
+    fn test_6max_scales_beyond_3max_without_schema_shortcuts() {
+        let (tables_3, _) = canonical_3max_cash_profile();
+        let (tables_6, _) = canonical_6max_cash_profile();
+
+        // 6-max uses V2 schema, same as 3-max — no schema shortcut
+        assert_eq!(tables_3.profile.info_version(), InfoVersion::V2);
+        assert_eq!(tables_6.profile.info_version(), InfoVersion::V2);
+
+        // Both use v4 abstraction with exact seat lookup
+        assert!(tables_3.abstraction.uses_exact_seat_lookup());
+        assert!(tables_6.abstraction.uses_exact_seat_lookup());
+        assert!(tables_3.abstraction.uses_multiway_v4_bucketing());
+        assert!(tables_6.abstraction.uses_multiway_v4_bucketing());
+
+        // Table names are fully isolated between seat counts
+        assert_ne!(tables_3.profile.blueprint(), tables_6.profile.blueprint());
+        assert_ne!(
+            tables_3.abstraction.isomorphism(),
+            tables_6.abstraction.isomorphism()
+        );
+        assert_ne!(
+            tables_3.abstraction.abstraction(),
+            tables_6.abstraction.abstraction()
+        );
+
+        // Neither collides with default HU
+        let hu = TrainingTables::default_hu();
+        assert_ne!(tables_6.profile.blueprint(), hu.profile.blueprint());
+        assert_ne!(
+            tables_6.abstraction.isomorphism(),
+            hu.abstraction.isomorphism()
+        );
+    }
+
+    #[test]
+    fn test_6max_gate_record_round_trip() {
+        let record = GateRecord {
+            profile_id: "bp_6max_cash".to_string(),
+            abstraction_version: "abs_v4_p6".to_string(),
+            engine_version: "v2".to_string(),
+            info_version: "V2".to_string(),
+            seat_count: 6,
+            clustering_status: GateStatus::Untested,
+            training_status: GateStatus::Untested,
+            serving_status: GateStatus::Untested,
+            benchmarks: GateBenchmarks {
+                memory_mb: None,
+                db_size_mb: None,
+                clustering_runtime_secs: None,
+                training_runtime_secs: None,
+                query_latency_ms: None,
+            },
+            verdict: GateVerdict::Pending,
+            notes: "awaiting 3-max gate pass".to_string(),
+        };
+        assert!(record.validate().is_ok());
+
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: GateRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.profile_id, "bp_6max_cash");
+        assert_eq!(deserialized.seat_count, 6);
+        assert_eq!(deserialized.verdict, GateVerdict::Pending);
     }
 }

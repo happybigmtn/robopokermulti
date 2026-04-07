@@ -1336,4 +1336,43 @@ mod tests {
 
         assert!(game.next().is_none());
     }
+
+    #[test]
+    fn test_deterministic_replay_same_actions_same_result() {
+        for seat_count in [3, 6, 10] {
+            let config = TableConfig::for_players(seat_count).with_stack(100);
+            let root = Game::root_with_config(config);
+
+            // Collect a legal action sequence: everyone folds to the BB
+            let mut actions = Vec::new();
+            let mut game = root.clone();
+            while game.turn() != Turn::Terminal {
+                let action = Action::Fold;
+                if game.is_allowed(&action) {
+                    actions.push(action);
+                    game = game.apply(action);
+                } else {
+                    break;
+                }
+            }
+
+            // Replay the same actions from the same starting state
+            let mut replay = root;
+            for action in &actions {
+                replay = replay.apply(*action);
+            }
+
+            // Both must reach the same terminal state
+            for i in 0..seat_count {
+                assert_eq!(
+                    game.seats[i].stack(),
+                    replay.seats[i].stack(),
+                    "stack diverged at seat {} in {}-seat game",
+                    i,
+                    seat_count
+                );
+            }
+            assert_eq!(game.pot(), replay.pot());
+        }
+    }
 }

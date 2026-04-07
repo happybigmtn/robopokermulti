@@ -15,7 +15,11 @@ impl From<API> for CLI {
 impl CLI {
     pub async fn run() -> () {
         log::info!("entering analysis");
-        let cli = Self(API::from(crate::save::db().await));
+        let api = API::from_env().await.unwrap_or_else(|err| {
+            eprintln!("analysis config error: {}", err);
+            std::process::exit(1);
+        });
+        let cli = Self(api);
         loop {
             print!("> ");
             let ref mut input = String::new();
@@ -35,18 +39,21 @@ impl CLI {
     async fn handle(&self, input: &str) -> Result<(), Box<dyn std::error::Error>> {
         match Query::try_parse_from(std::iter::once("> ").chain(input.split_whitespace()))? {
             Query::Abstraction { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
-                    return Ok(println!("{}", self.0.obs_to_abs(obs).await?));
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
+                    return Ok(println!("{}", self.0.obs_to_abs(obs, seat_position).await?));
                 }
                 Err("invalid abstraction target".into())
             }
 
             Query::Distance { target1, target2 } => {
-                if let (Ok(o1), Ok(o2)) = (
-                    Observation::try_from(target1.as_str()),
-                    Observation::try_from(target2.as_str()),
+                if let (Ok((o1, seat1)), Ok((o2, seat2))) = (
+                    self.0.parse_observation_target(target1.as_str()),
+                    self.0.parse_observation_target(target2.as_str()),
                 ) {
-                    return Ok(println!("{:.4}", self.0.obs_distance(o1, o2).await?));
+                    return Ok(println!(
+                        "{:.4}",
+                        self.0.obs_distance(o1, seat1, o2, seat2).await?
+                    ));
                 }
                 if let (Ok(a1), Ok(a2)) = (
                     Abstraction::try_from(target1.as_str()),
@@ -58,8 +65,11 @@ impl CLI {
             }
 
             Query::Equity { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
-                    return Ok(println!("{:.4}", self.0.obs_equity(obs).await?));
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
+                    return Ok(println!(
+                        "{:.4}",
+                        self.0.obs_equity(obs, seat_position).await?
+                    ));
                 }
                 if let Ok(abs) = Abstraction::try_from(target.as_str()) {
                     return Ok(println!("{:.4}", self.0.abs_equity(abs).await?));
@@ -68,8 +78,11 @@ impl CLI {
             }
 
             Query::Population { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
-                    return Ok(println!("{}", self.0.obs_population(obs).await?));
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
+                    return Ok(println!(
+                        "{}",
+                        self.0.obs_population(obs, seat_position).await?
+                    ));
                 }
                 if let Ok(abs) = Abstraction::try_from(target.as_str()) {
                     return Ok(println!("{}", self.0.abs_population(abs).await?));
@@ -78,10 +91,10 @@ impl CLI {
             }
 
             Query::Similar { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
                     let members = self
                         .0
-                        .obs_similar(obs)
+                        .obs_similar(obs, seat_position)
                         .await?
                         .iter()
                         .map(|obs| (obs, Strength::from(Hand::from(*obs))))
@@ -106,10 +119,10 @@ impl CLI {
             }
 
             Query::Nearby { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
                     let neighborhood = self
                         .0
-                        .obs_nearby(obs)
+                        .obs_nearby(obs, seat_position)
                         .await?
                         .iter()
                         .enumerate()
@@ -134,10 +147,10 @@ impl CLI {
             }
 
             Query::Composition { target } => {
-                if let Ok(obs) = Observation::try_from(target.as_str()) {
+                if let Ok((obs, seat_position)) = self.0.parse_observation_target(target.as_str()) {
                     let distribution = self
                         .0
-                        .obs_histogram(obs)
+                        .obs_histogram(obs, seat_position)
                         .await?
                         .distribution()
                         .iter()

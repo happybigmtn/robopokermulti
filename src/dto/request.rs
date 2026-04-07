@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 pub struct SetStreets {
     pub street: String,
+    pub seat_position: Option<u8>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,4 +54,9 @@ pub struct GetPolicy {
     pub turn: String,
     pub seen: String,
     pub past: Vec<String>,
+    pub seat_count: Option<usize>,
+    pub small_blind: Option<i16>,
+    pub big_blind: Option<i16>,
+    pub ante: Option<i16>,
+    pub starting_stack: Option<i16>,
 }

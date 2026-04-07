@@ -4,7 +4,7 @@ use clap::Parser;
 #[command(author, version, about, long_about = None)]
 pub enum Query {
     #[command(
-        about = "Find the abstractions of any given observation",
+        about = "Find the abstraction of an observation (use '<obs>@<seat>' for seat-aware abstractions)",
         alias = "abs"
     )]
     Abstraction {
@@ -13,7 +13,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find the distance between two targets (obs~obs or abs~abs)",
+        about = "Find the distance between two targets (obs@seat~obs@seat or abs~abs)",
         alias = "dst"
     )]
     Distance {
@@ -24,7 +24,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find observations belonging to the same cluster of any given observation or abstraction",
+        about = "Find observations in the same cluster as a target (use '<obs>@<seat>' when needed)",
         alias = "sim"
     )]
     Similar {
@@ -33,7 +33,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find abstractions in the neighborhood of any given observation or abstraction",
+        about = "Find nearby abstractions for a target (use '<obs>@<seat>' when needed)",
         alias = "nbr"
     )]
     Nearby {
@@ -42,7 +42,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find the equity of any given observation or abstraction",
+        about = "Find the equity of a target (use '<obs>@<seat>' for seat-aware abstractions)",
         alias = "eqt"
     )]
     Equity {
@@ -51,7 +51,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find the population of any given observation or abstraction",
+        about = "Find the population of a target (use '<obs>@<seat>' for seat-aware abstractions)",
         alias = "pop"
     )]
     Population {
@@ -60,7 +60,7 @@ pub enum Query {
     },
 
     #[command(
-        about = "Find the histogram of any given observation or abstraction",
+        about = "Find the histogram of a target (use '<obs>@<seat>' for seat-aware abstractions)",
         alias = "hst"
     )]
     Composition {

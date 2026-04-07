@@ -15,7 +15,7 @@ pub struct Server;
 
 impl Server {
     pub async fn run() -> Result<(), std::io::Error> {
-        let api = web::Data::new(API::from(crate::save::db().await));
+        let api = web::Data::new(API::from_env().await.map_err(std::io::Error::other)?);
         log::info!("starting HTTP server");
         HttpServer::new(move || {
             App::new()
@@ -56,10 +56,9 @@ async fn health() -> impl Responder {
 }
 
 async fn replace_obs(api: web::Data<API>, req: web::Json<ReplaceObs>) -> impl Responder {
-    let obs = Observation::try_from(req.obs.as_str());
-    match obs {
-        Err(_) => HttpResponse::BadRequest().body("invalid observation format"),
-        Ok(obs) => match api.replace_obs(obs).await {
+    match api.parse_observation_target(req.obs.as_str()) {
+        Err(err) => HttpResponse::BadRequest().body(err.to_string()),
+        Ok((obs, seat_position)) => match api.replace_obs(obs, seat_position).await {
             Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
             Ok(new) => HttpResponse::Ok().json(new.to_string()),
         },
@@ -70,7 +69,7 @@ async fn exp_wrt_str(api: web::Data<API>, req: web::Json<SetStreets>) -> impl Re
     let street = Street::try_from(req.street.as_str());
     match street {
         Err(_) => HttpResponse::BadRequest().body("invalid street format"),
-        Ok(street) => match api.exp_wrt_str(street).await {
+        Ok(street) => match api.exp_wrt_str(street, req.seat_position).await {
             Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
             Ok(row) => HttpResponse::Ok().json(row),
         },
@@ -87,10 +86,9 @@ async fn exp_wrt_abs(api: web::Data<API>, req: web::Json<ReplaceAbs>) -> impl Re
     }
 }
 async fn exp_wrt_obs(api: web::Data<API>, req: web::Json<RowWrtObs>) -> impl Responder {
-    let obs = Observation::try_from(req.obs.as_str());
-    match obs {
-        Err(_) => HttpResponse::BadRequest().body("invalid observation format"),
-        Ok(obs) => match api.exp_wrt_obs(obs).await {
+    match api.parse_observation_target(req.obs.as_str()) {
+        Err(err) => HttpResponse::BadRequest().body(err.to_string()),
+        Ok((obs, seat_position)) => match api.exp_wrt_obs(obs, seat_position).await {
             Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
             Ok(row) => HttpResponse::Ok().json(row),
         },
@@ -121,14 +119,16 @@ async fn nbr_abs_wrt_abs(api: web::Data<API>, req: web::Json<ReplaceOne>) -> imp
 }
 async fn nbr_obs_wrt_abs(api: web::Data<API>, req: web::Json<ReplaceRow>) -> impl Responder {
     let wrt = Abstraction::try_from(req.wrt.as_str());
-    let obs = Observation::try_from(req.obs.as_str());
+    let obs = api.parse_observation_target(req.obs.as_str());
     match (wrt, obs) {
         (Err(_), _) => HttpResponse::BadRequest().body("invalid abstraction format"),
-        (_, Err(_)) => HttpResponse::BadRequest().body("invalid observation format"),
-        (Ok(abs), Ok(obs)) => match api.nbr_obs_wrt_abs(abs, obs).await {
-            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-            Ok(rows) => HttpResponse::Ok().json(rows),
-        },
+        (_, Err(err)) => HttpResponse::BadRequest().body(err.to_string()),
+        (Ok(abs), Ok((obs, seat_position))) => {
+            match api.nbr_obs_wrt_abs(abs, obs, seat_position).await {
+                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+                Ok(rows) => HttpResponse::Ok().json(rows),
+            }
+        }
     }
 }
 
@@ -160,11 +160,10 @@ async fn kgn_wrt_abs(api: web::Data<API>, req: web::Json<ReplaceAll>) -> impl Re
             let obs = req
                 .neighbors
                 .iter()
-                .map(|string| string.as_str())
-                .map(Observation::try_from)
+                .map(|string| api.parse_observation_target(string))
                 .filter_map(|result| result.ok())
-                .filter(|o| o.street() == wrt.street())
-                .chain((0..).map(|_| Observation::from(wrt.street())))
+                .filter(|(obs, _)| obs.street() == wrt.street())
+                .chain((0..).map(|_| (Observation::from(wrt.street()), 0)))
                 .take(5)
                 .collect::<Vec<_>>();
             match api.kgn_wrt_abs(wrt, obs).await {
@@ -187,10 +186,9 @@ async fn hst_wrt_abs(api: web::Data<API>, req: web::Json<AbsHist>) -> impl Respo
 }
 
 async fn hst_wrt_obs(api: web::Data<API>, req: web::Json<ObsHist>) -> impl Responder {
-    let obs = Observation::try_from(req.obs.as_str());
-    match obs {
-        Err(_) => HttpResponse::BadRequest().body("invalid observation format"),
-        Ok(obs) => match api.hst_wrt_obs(obs).await {
+    match api.parse_observation_target(req.obs.as_str()) {
+        Err(err) => HttpResponse::BadRequest().body(err.to_string()),
+        Ok((obs, seat_position)) => match api.hst_wrt_obs(obs, seat_position).await {
             Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
             Ok(rows) => HttpResponse::Ok().json(rows),
         },
@@ -198,22 +196,145 @@ async fn hst_wrt_obs(api: web::Data<API>, req: web::Json<ObsHist>) -> impl Respo
 }
 
 async fn blueprint(api: web::Data<API>, req: web::Json<GetPolicy>) -> impl Responder {
-    let hero = Turn::try_from(req.turn.as_str());
-    let seen = Observation::try_from(req.seen.as_str());
+    match build_policy_recall(&req) {
+        Err(err) => HttpResponse::BadRequest().body(err),
+        Ok(recall) => match api.policy(recall).await {
+            Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
+            Ok(Some(strategy)) => HttpResponse::Ok().json(strategy),
+            Ok(None) => HttpResponse::Ok().json(serde_json::Value::Null),
+        },
+    }
+}
+
+fn parse_policy_table_config(req: &GetPolicy) -> Result<Option<TableConfig>, String> {
+    let any_set = req.seat_count.is_some()
+        || req.small_blind.is_some()
+        || req.big_blind.is_some()
+        || req.ante.is_some()
+        || req.starting_stack.is_some();
+    if !any_set {
+        return Ok(None);
+    }
+
+    let seat_count = req.seat_count.ok_or_else(|| {
+        "seat_count is required when providing blueprint table config".to_string()
+    })?;
+    let small_blind = req.small_blind.ok_or_else(|| {
+        "small_blind is required when providing blueprint table config".to_string()
+    })?;
+    let big_blind = req
+        .big_blind
+        .ok_or_else(|| "big_blind is required when providing blueprint table config".to_string())?;
+    let ante = req.ante.unwrap_or(0);
+    let starting_stack = req.starting_stack.ok_or_else(|| {
+        "starting_stack is required when providing blueprint table config".to_string()
+    })?;
+
+    let config = TableConfig {
+        seat_count,
+        small_blind,
+        big_blind,
+        ante,
+        starting_stack,
+    };
+    config
+        .validate()
+        .map_err(|err| format!("invalid table config: {}", err))?;
+    Ok(Some(config))
+}
+
+fn build_policy_recall(req: &GetPolicy) -> Result<Recall, String> {
+    let hero = Turn::try_from(req.turn.as_str()).map_err(|_| "invalid player turn".to_string())?;
+    let seen = Observation::try_from(req.seen.as_str())
+        .map_err(|_| "invalid observation format".to_string())?;
     let path = req
         .past
         .iter()
         .map(|string| string.as_str())
         .map(Action::try_from)
-        .collect::<Result<Vec<_>, _>>();
-    match (hero, seen, path) {
-        (Ok(hero), Ok(seen), Ok(path)) => {
-            match api.policy(Recall::from((hero, seen, path))).await {
-                Err(e) => HttpResponse::InternalServerError().body(e.to_string()),
-                Ok(Some(strategy)) => HttpResponse::Ok().json(strategy),
-                Ok(None) => HttpResponse::Ok().json(serde_json::Value::Null),
-            }
-        }
-        _ => HttpResponse::BadRequest().body("invalid recall format"),
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "invalid action history".to_string())?;
+    let config = parse_policy_table_config(req)?;
+    Ok(match config {
+        Some(config) => Recall::from_actions_with_config(hero, seen, path, config),
+        None => Recall::from((hero, seen, path)),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_policy_recall, parse_policy_table_config};
+    use crate::analysis::GetPolicy;
+    use crate::gameplay::Action;
+
+    #[test]
+    fn parse_policy_table_config_returns_none_when_omitted() {
+        let req = GetPolicy {
+            turn: "P0".to_string(),
+            seen: "2c 3c".to_string(),
+            past: vec![],
+            seat_count: None,
+            small_blind: None,
+            big_blind: None,
+            ante: None,
+            starting_stack: None,
+        };
+        assert!(parse_policy_table_config(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_policy_table_config_builds_valid_multiway_config() {
+        let req = GetPolicy {
+            turn: "P1".to_string(),
+            seen: "2c 3c".to_string(),
+            past: vec![],
+            seat_count: Some(6),
+            small_blind: Some(1),
+            big_blind: Some(2),
+            ante: Some(1),
+            starting_stack: Some(200),
+        };
+        let config = parse_policy_table_config(&req).unwrap().unwrap();
+        assert_eq!(config.seat_count, 6);
+        assert_eq!(config.small_blind, 1);
+        assert_eq!(config.big_blind, 2);
+        assert_eq!(config.ante, 1);
+        assert_eq!(config.starting_stack, 200);
+    }
+
+    #[test]
+    fn parse_policy_table_config_ignores_street_request_seat_position() {
+        let req = GetPolicy {
+            turn: "P0".to_string(),
+            seen: "2c 3c".to_string(),
+            past: vec![],
+            seat_count: None,
+            small_blind: None,
+            big_blind: None,
+            ante: None,
+            starting_stack: None,
+        };
+        assert!(parse_policy_table_config(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_policy_recall_uses_configured_posting_prefix() {
+        let req = GetPolicy {
+            turn: "P0".to_string(),
+            seen: "2c 3c".to_string(),
+            past: vec!["CALL 5".to_string()],
+            seat_count: Some(3),
+            small_blind: Some(2),
+            big_blind: Some(5),
+            ante: Some(1),
+            starting_stack: Some(200),
+        };
+        let recall = build_policy_recall(&req).unwrap();
+        assert_eq!(recall.config().unwrap().seat_count, 3);
+        assert_eq!(recall.actions().len(), 6);
+        assert_eq!(recall.actions()[0], Action::Blind(1));
+        assert_eq!(recall.actions()[3], Action::Blind(2));
+        assert_eq!(recall.actions()[4], Action::Blind(5));
+        assert_eq!(recall.actions()[5], Action::Call(5));
     }
 }

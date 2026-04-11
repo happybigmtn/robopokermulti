@@ -1,8 +1,9 @@
 # Tournament Utility Layer Boundary
 
-## What This Layer Provides
+## What This Repo Provides Today
 
-The current `robopokermulti` tournament support is a **utility layer only**:
+The current `robopokermulti` tournament support now has **two distinct
+surfaces**:
 
 - **Payout-curve utilities**: `TournamentPayout` normalizes and splits payouts
   by final-stack ranking, including tie-splitting for equal stacks
@@ -18,32 +19,38 @@ The current `robopokermulti` tournament support is a **utility layer only**:
   sampling draws blind levels proportionally from the schedule, producing
   deterministic table configurations per epoch.
 
-## What This Layer Does NOT Provide
+- **Shared tournament state and lifecycle control**:
+  `src/gameplay/tournament_state.rs` now carries explicit tournament
+  registration, blind-level progression, between-hand balancing, break/pause,
+  final-table collapse, elimination records, completion, and serializable
+  operator/player views above any one hand transcript.
 
-The following are explicitly out of scope until future tournament lifecycle
-work lands:
+## What This Repo Still Does NOT Provide
 
-- **Registration and entrant management**: No registration flow, buy-in
-  handling, or entrant roster state.
+The following are still explicitly out of scope for the live product/runtime
+surface:
 
-- **Multi-table balancing**: No table-break logic, seat redistribution, or
-  player movement between tables.
+- **Live tournament runtime orchestration**: No hosted or networked
+  tournament-mode room runtime exists yet. The lifecycle code is a shared
+  state/controller layer, not a complete operator service or player product.
 
-- **Elimination and redraw**: No bust-out detection, single-table consolidation,
-  or final-table transitions.
+- **Tournament-specific UI/runtime plumbing**: No dedicated tournament TUI,
+  transport, or hosting workflow exists yet for the registration, movement,
+  break, or payout surfaces.
 
-- **Blind level advancement**: Training samples blind levels statically from
-  the schedule. There is no dynamic level clock, break scheduling, or
-  ante-progression state machine.
+- **Automatic clock-driven control**: Blind levels and break transitions are
+  operator-driven state changes today. There is no wall-clock scheduler or
+  autonomous event controller.
 
-- **Resume and pause**: No tournament-level pause/resume or mid-tournament
-  persistence beyond what the underlying hand-level session provides.
+- **Full tournament product integration**: Late-registration policy, seating,
+  and event progress are modeled in shared state, but they are not yet wired
+  into a user-facing product flow.
 
 ## Dependency Chain
 
-Future tournament lifecycle work (RT-05A, RT-05B) depends on this utility
-boundary rather than blurring the distinction between utility support and
-full tournament state.
+The training/profile utilities remain separate from the lifecycle controller so
+future tournament runtime work can build on both without blurring them into one
+claim.
 
 ## Evidence
 
@@ -53,3 +60,7 @@ full tournament state.
 - `training_profile_config_tournament_sampling_is_deterministic` (tables::tests)
 - `tournament_payout_splits_ties` (tournament::tests)
 - `game_payoff_uses_tournament_payout_when_set` (tournament::tests)
+- `registration_flow_opens_closes_and_starts_with_visible_state`
+- `blind_level_changes_only_after_current_hand_finishes`
+- `elimination_records_place_table_hand_and_final_payout`
+- `pause_and_resume_preserve_level_metadata_and_assignments`

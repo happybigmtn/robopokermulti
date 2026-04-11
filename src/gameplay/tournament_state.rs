@@ -51,23 +51,55 @@ impl From<u64> for TournamentTableId {
     }
 }
 
-/// First tournament format supported by the architecture line.
+/// First tournament format supported by the lifecycle line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TournamentFormat {
     Freezeout,
 }
 
+/// Registration policy owned at the tournament layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentRegistrationConfig {
+    pub max_entrants: usize,
+    pub starting_stack: Chips,
+    pub late_registration_allowed: bool,
+}
+
+impl TournamentRegistrationConfig {
+    pub fn freezeout(
+        max_entrants: usize,
+        starting_stack: Chips,
+    ) -> Result<Self, TournamentStateError> {
+        if max_entrants < 2 {
+            return Err(TournamentStateError::InvalidEntrantCapacity { max_entrants });
+        }
+        if starting_stack <= 0 {
+            return Err(TournamentStateError::InvalidStartingStack { starting_stack });
+        }
+        Ok(Self {
+            max_entrants,
+            starting_stack,
+            late_registration_allowed: false,
+        })
+    }
+}
+
 /// Event-level lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TournamentStatus {
+    Announced,
+    Registering,
     Running,
-    Paused,
-    Complete,
+    OnBreak,
+    Balancing,
+    FinalTable,
+    Completed,
+    Cancelled,
 }
 
-/// Truthful boundary for between-hand operations like balancing.
+/// Truthful boundary for between-hand operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TournamentBoundary {
@@ -98,15 +130,25 @@ impl TournamentBlindLevel {
 pub struct TournamentDefinition {
     pub id: TournamentId,
     pub format: TournamentFormat,
+    pub registration: TournamentRegistrationConfig,
     pub blind_schedule: Vec<TournamentBlindLevel>,
     pub payout: TournamentPayout,
 }
 
 /// Resume metadata stored above any individual table transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TournamentResumeMetadata {
     pub completed_hands: u64,
     pub next_hand_number: u64,
+}
+
+impl Default for TournamentResumeMetadata {
+    fn default() -> Self {
+        Self {
+            completed_hands: 0,
+            next_hand_number: 1,
+        }
+    }
 }
 
 /// A currently available live table in the tournament.
@@ -150,12 +192,38 @@ impl TableSeatAssignment {
     }
 }
 
+/// Final bust-out record for one entrant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentElimination {
+    pub place: usize,
+    pub table_id: TournamentTableId,
+    pub hand_number: u64,
+    pub tied_at_boundary: bool,
+}
+
+impl TournamentElimination {
+    pub fn new(
+        place: usize,
+        table_id: TournamentTableId,
+        hand_number: u64,
+        tied_at_boundary: bool,
+    ) -> Self {
+        Self {
+            place,
+            table_id,
+            hand_number,
+            tied_at_boundary,
+        }
+    }
+}
+
 /// Entrant status at the tournament level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TournamentEntrantStatus {
+    Registered,
     Active,
-    Eliminated { place: usize },
+    Eliminated(TournamentElimination),
 }
 
 /// Tournament-owned participant state.
@@ -169,6 +237,16 @@ pub struct TournamentEntrant {
 }
 
 impl TournamentEntrant {
+    pub fn registered(entrant_id: u64, display_name: &str, stack: Chips) -> Self {
+        Self {
+            entrant_id: entrant_id.into(),
+            display_name: display_name.to_string(),
+            stack,
+            status: TournamentEntrantStatus::Registered,
+            assignment: None,
+        }
+    }
+
     pub fn active(
         entrant_id: u64,
         display_name: &str,
@@ -185,14 +263,23 @@ impl TournamentEntrant {
         }
     }
 
-    pub fn eliminated(entrant_id: u64, display_name: &str, stack: Chips, place: usize) -> Self {
+    pub fn eliminated(
+        entrant_id: u64,
+        display_name: &str,
+        stack: Chips,
+        elimination: TournamentElimination,
+    ) -> Self {
         Self {
             entrant_id: entrant_id.into(),
             display_name: display_name.to_string(),
             stack,
-            status: TournamentEntrantStatus::Eliminated { place },
+            status: TournamentEntrantStatus::Eliminated(elimination),
             assignment: None,
         }
+    }
+
+    pub fn is_registered(&self) -> bool {
+        matches!(self.status, TournamentEntrantStatus::Registered)
     }
 
     pub fn is_active(&self) -> bool {
@@ -200,7 +287,7 @@ impl TournamentEntrant {
     }
 }
 
-/// Planned between-hand balancing move.
+/// Planned between-hand balancing or seating move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TournamentSeatMove {
     pub entrant_id: TournamentEntrantId,
@@ -216,21 +303,73 @@ impl TournamentSeatMove {
     }
 }
 
+/// Reason the event is waiting at an operator-visible pause boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TournamentPauseReason {
+    ScheduledBreak,
+    Operator,
+}
+
+/// Persisted pause metadata for a paused or break-bound tournament.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TournamentPauseState {
+    pub reason: TournamentPauseReason,
+    pub resume_status: TournamentStatus,
+}
+
+/// Operator-facing summary of event state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TournamentOperatorView {
+    pub tournament_id: TournamentId,
+    pub status: TournamentStatus,
+    pub registration_open: bool,
+    pub current_level_index: usize,
+    pub current_level: TournamentBlindLevel,
+    pub pending_level_index: Option<usize>,
+    pub pending_pause_reason: Option<TournamentPauseReason>,
+    pub pause_state: Option<TournamentPauseState>,
+    pub tables: Vec<TournamentTable>,
+    pub registered_entrants: usize,
+    pub active_entrants: usize,
+    pub eliminated_entrants: usize,
+    pub pending_balance_plan: Vec<TournamentSeatMove>,
+}
+
+/// Player-facing summary of one entrant's current tournament state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TournamentPlayerView {
+    pub tournament_id: TournamentId,
+    pub tournament_status: TournamentStatus,
+    pub registration_open: bool,
+    pub current_level_index: Option<usize>,
+    pub current_level: Option<TournamentBlindLevel>,
+    pub entrant: TournamentEntrant,
+    pub pending_assignment: Option<TableSeatAssignment>,
+    pub payout: Option<Utility>,
+}
+
 /// Validated tournament state above any one table transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentState {
     pub definition: TournamentDefinition,
     pub status: TournamentStatus,
     pub boundary: TournamentBoundary,
+    pub registration_open: bool,
     pub current_level_index: usize,
+    pub pending_level_index: Option<usize>,
+    pub pending_pause_reason: Option<TournamentPauseReason>,
+    pub pause_state: Option<TournamentPauseState>,
     pub resume: TournamentResumeMetadata,
     pub tables: Vec<TournamentTable>,
     pub elimination_order: Vec<TournamentEntrantId>,
+    pub pending_balance_plan: Vec<TournamentSeatMove>,
+    balancing_resume_status: Option<TournamentStatus>,
     entrants: BTreeMap<TournamentEntrantId, TournamentEntrant>,
 }
 
 impl TournamentState {
-    /// Creates a validated tournament state snapshot.
+    /// Creates a validated running tournament snapshot.
     ///
     /// Args:
     ///   definition: Event-level metadata, blind schedule, and payout structure.
@@ -238,7 +377,7 @@ impl TournamentState {
     ///   entrants: Entrants with stacks and current seat ownership.
     ///
     /// Returns:
-    ///   A validated tournament state snapshot suitable for balancing/resume work.
+    ///   A validated tournament state snapshot suitable for resume work.
     pub fn new(
         definition: TournamentDefinition,
         tables: Vec<TournamentTable>,
@@ -249,12 +388,46 @@ impl TournamentState {
             definition,
             status: TournamentStatus::Running,
             boundary: TournamentBoundary::BetweenHands,
+            registration_open: false,
             current_level_index: 0,
+            pending_level_index: None,
+            pending_pause_reason: None,
+            pause_state: None,
             resume: TournamentResumeMetadata::default(),
             tables,
             elimination_order: Vec::new(),
+            pending_balance_plan: Vec::new(),
+            balancing_resume_status: None,
             entrants,
         })
+    }
+
+    /// Creates an announced tournament before registration opens.
+    pub fn announced(
+        definition: TournamentDefinition,
+        tables: Vec<TournamentTable>,
+    ) -> Result<Self, TournamentStateError> {
+        let entrants = validate_tournament_state(&definition, &tables, Vec::new(), &[])?;
+        Ok(Self {
+            definition,
+            status: TournamentStatus::Announced,
+            boundary: TournamentBoundary::BetweenHands,
+            registration_open: false,
+            current_level_index: 0,
+            pending_level_index: None,
+            pending_pause_reason: None,
+            pause_state: None,
+            resume: TournamentResumeMetadata::default(),
+            tables,
+            elimination_order: Vec::new(),
+            pending_balance_plan: Vec::new(),
+            balancing_resume_status: None,
+            entrants,
+        })
+    }
+
+    pub fn current_level(&self) -> TournamentBlindLevel {
+        self.definition.blind_schedule[self.current_level_index]
     }
 
     pub fn entrant(&self, entrant_id: u64) -> Option<&TournamentEntrant> {
@@ -265,49 +438,294 @@ impl TournamentState {
         self.entrants.values()
     }
 
-    /// Applies a between-hand balance plan.
-    ///
-    /// Args:
-    ///   moves: Entrant-to-seat moves to apply atomically.
-    ///
-    /// Returns:
-    ///   Ok when every move lands on a valid empty seat at a truthful boundary.
-    pub fn apply_balance_plan(
+    pub fn operator_view(&self) -> TournamentOperatorView {
+        TournamentOperatorView {
+            tournament_id: self.definition.id,
+            status: self.status,
+            registration_open: self.registration_open,
+            current_level_index: self.current_level_index,
+            current_level: self.current_level(),
+            pending_level_index: self.pending_level_index,
+            pending_pause_reason: self.pending_pause_reason,
+            pause_state: self.pause_state,
+            tables: self.tables.clone(),
+            registered_entrants: self.registered_count(),
+            active_entrants: self.active_count(),
+            eliminated_entrants: self.eliminated_count(),
+            pending_balance_plan: self.pending_balance_plan.clone(),
+        }
+    }
+
+    pub fn player_view(&self, entrant_id: TournamentEntrantId) -> Option<TournamentPlayerView> {
+        let entrant = self.entrants.get(&entrant_id)?.clone();
+        let pending_assignment = self.pending_balance_plan.iter().find_map(|movement| {
+            if movement.entrant_id == entrant_id {
+                Some(movement.destination)
+            } else {
+                None
+            }
+        });
+        let payout = self
+            .payouts_by_finish()
+            .ok()
+            .and_then(|payouts| payouts.get(&entrant_id).copied());
+        let current_level = match self.status {
+            TournamentStatus::Announced | TournamentStatus::Registering => None,
+            _ => Some(self.current_level()),
+        };
+        let current_level_index = current_level.map(|_| self.current_level_index);
+        Some(TournamentPlayerView {
+            tournament_id: self.definition.id,
+            tournament_status: self.status,
+            registration_open: self.registration_open,
+            current_level_index,
+            current_level,
+            entrant,
+            pending_assignment,
+            payout,
+        })
+    }
+
+    pub fn open_registration(&mut self) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Announced],
+            "open registration",
+        )?;
+        self.registration_open = true;
+        self.status = TournamentStatus::Registering;
+        Ok(())
+    }
+
+    pub fn close_registration(&mut self) -> Result<(), TournamentStateError> {
+        if !self.registration_open {
+            return Err(TournamentStateError::RegistrationClosed);
+        }
+        self.registration_open = false;
+        if self.status == TournamentStatus::Registering {
+            self.status = TournamentStatus::Announced;
+        }
+        Ok(())
+    }
+
+    pub fn register_entrant(
         &mut self,
-        moves: &[TournamentSeatMove],
+        entrant_id: TournamentEntrantId,
+        display_name: &str,
     ) -> Result<(), TournamentStateError> {
-        require_between_hands(self.boundary)?;
-        if moves.is_empty() {
-            return Ok(());
+        if !self.registration_open {
+            return Err(TournamentStateError::RegistrationClosed);
+        }
+        if self.entrants.len() >= self.definition.registration.max_entrants {
+            return Err(TournamentStateError::RegistrationFull {
+                max_entrants: self.definition.registration.max_entrants,
+            });
+        }
+        if self.entrants.contains_key(&entrant_id) {
+            return Err(TournamentStateError::DuplicateEntrant(entrant_id));
+        }
+        if matches!(
+            self.status,
+            TournamentStatus::Running | TournamentStatus::FinalTable
+        ) && !self.definition.registration.late_registration_allowed
+        {
+            return Err(TournamentStateError::InvalidStatus {
+                action: "late register entrant",
+                status: self.status,
+            });
+        }
+        if matches!(
+            self.status,
+            TournamentStatus::Running | TournamentStatus::FinalTable
+        ) {
+            require_between_hands(self.boundary, "late registration")?;
+        } else {
+            require_status(
+                self.status,
+                &[TournamentStatus::Registering],
+                "register entrant",
+            )?;
         }
 
-        let mut moved_entrants = BTreeSet::new();
-        let mut destinations = BTreeSet::new();
-        for movement in moves {
-            if !moved_entrants.insert(movement.entrant_id) {
-                return Err(TournamentStateError::DuplicateMoveEntrant(
-                    movement.entrant_id,
-                ));
-            }
-            if !destinations.insert((
+        let entrant = TournamentEntrant::registered(
+            entrant_id.0,
+            display_name,
+            self.definition.registration.starting_stack,
+        );
+        self.entrants.insert(entrant_id, entrant);
+        Ok(())
+    }
+
+    pub fn start_event(
+        &mut self,
+        assignments: &[TournamentSeatMove],
+    ) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Announced, TournamentStatus::Registering],
+            "start tournament",
+        )?;
+        let registered = self.registered_count();
+        if registered < 2 {
+            return Err(TournamentStateError::NotEnoughEntrantsToStart { registered });
+        }
+        if assignments.len() != registered {
+            return Err(TournamentStateError::StartAssignmentsIncomplete {
+                expected: registered,
+                actual: assignments.len(),
+            });
+        }
+        self.seat_registered_entrants(assignments)?;
+        self.status = TournamentStatus::Running;
+        self.registration_open = self.definition.registration.late_registration_allowed;
+        self.resume.next_hand_number = 1;
+        Ok(())
+    }
+
+    pub fn seat_registered_entrants(
+        &mut self,
+        assignments: &[TournamentSeatMove],
+    ) -> Result<(), TournamentStateError> {
+        require_between_hands(self.boundary, "seat registered entrants")?;
+        validate_seat_moves(
+            &self.tables,
+            &self.entrants,
+            assignments,
+            TournamentSeatMoveKind::RegisteredEntrant,
+        )?;
+
+        let occupied = self.occupied_seats_without(&BTreeSet::new());
+        for movement in assignments {
+            if occupied.contains(&(
                 movement.destination.table_id,
                 movement.destination.seat_index,
             )) {
-                return Err(TournamentStateError::DuplicateMoveDestination {
+                return Err(TournamentStateError::SeatOccupied {
                     table_id: movement.destination.table_id,
                     seat_index: movement.destination.seat_index,
                 });
             }
-            validate_assignment(&self.tables, movement.destination)?;
-            let entrant = self
-                .entrants
-                .get(&movement.entrant_id)
-                .ok_or(TournamentStateError::UnknownEntrant(movement.entrant_id))?;
-            if !entrant.is_active() {
-                return Err(TournamentStateError::EntrantNotActive(movement.entrant_id));
-            }
         }
 
+        for movement in assignments {
+            let entrant = self
+                .entrants
+                .get_mut(&movement.entrant_id)
+                .ok_or(TournamentStateError::UnknownEntrant(movement.entrant_id))?;
+            entrant.status = TournamentEntrantStatus::Active;
+            entrant.assignment = Some(movement.destination);
+        }
+        Ok(())
+    }
+
+    pub fn start_hand(&mut self) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Running, TournamentStatus::FinalTable],
+            "start hand",
+        )?;
+        require_between_hands(self.boundary, "start hand")?;
+        if !self.pending_balance_plan.is_empty() {
+            return Err(TournamentStateError::InvalidStatus {
+                action: "start hand with pending balance plan",
+                status: TournamentStatus::Balancing,
+            });
+        }
+        self.boundary = TournamentBoundary::HandInProgress;
+        Ok(())
+    }
+
+    pub fn finish_hand(&mut self) -> Result<(), TournamentStateError> {
+        if self.boundary != TournamentBoundary::HandInProgress {
+            return Err(TournamentStateError::InvalidStatus {
+                action: "finish hand",
+                status: self.status,
+            });
+        }
+        self.boundary = TournamentBoundary::BetweenHands;
+        self.resume.completed_hands += 1;
+        self.resume.next_hand_number = self.resume.completed_hands + 1;
+        if let Some(level_index) = self.pending_level_index.take() {
+            self.current_level_index = level_index;
+        }
+        if let Some(reason) = self.pending_pause_reason.take() {
+            let resume_status = self.play_resume_status();
+            self.pause_state = Some(TournamentPauseState {
+                reason,
+                resume_status,
+            });
+            self.status = TournamentStatus::OnBreak;
+        }
+        Ok(())
+    }
+
+    pub fn request_level_advance(
+        &mut self,
+        level_index: usize,
+    ) -> Result<(), TournamentStateError> {
+        validate_level_index(&self.definition.blind_schedule, level_index)?;
+        require_status(
+            self.status,
+            &[
+                TournamentStatus::Running,
+                TournamentStatus::FinalTable,
+                TournamentStatus::OnBreak,
+            ],
+            "advance blind level",
+        )?;
+        if self.boundary == TournamentBoundary::HandInProgress {
+            self.pending_level_index = Some(level_index);
+        } else {
+            self.current_level_index = level_index;
+            self.pending_level_index = None;
+        }
+        Ok(())
+    }
+
+    pub fn start_break(&mut self) -> Result<(), TournamentStateError> {
+        self.request_pause(TournamentPauseReason::ScheduledBreak)
+    }
+
+    pub fn pause_event(&mut self) -> Result<(), TournamentStateError> {
+        self.request_pause(TournamentPauseReason::Operator)
+    }
+
+    pub fn resume_event(&mut self) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::OnBreak],
+            "resume tournament",
+        )?;
+        require_between_hands(self.boundary, "resume tournament")?;
+        let pause_state = self
+            .pause_state
+            .ok_or(TournamentStateError::InvalidStatus {
+                action: "resume tournament without pause state",
+                status: self.status,
+            })?;
+        self.status = pause_state.resume_status;
+        self.pause_state = None;
+        Ok(())
+    }
+
+    pub fn publish_balance_plan(
+        &mut self,
+        moves: &[TournamentSeatMove],
+    ) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Running, TournamentStatus::FinalTable],
+            "publish balance plan",
+        )?;
+        require_between_hands(self.boundary, "publish balance plan")?;
+        validate_seat_moves(
+            &self.tables,
+            &self.entrants,
+            moves,
+            TournamentSeatMoveKind::ActiveEntrant,
+        )?;
+
+        let moved_entrants = moves.iter().map(|movement| movement.entrant_id).collect();
         let occupancy = self.occupied_seats_without(&moved_entrants);
         for movement in moves {
             if occupancy.contains(&(
@@ -321,21 +739,65 @@ impl TournamentState {
             }
         }
 
-        for movement in moves {
+        self.pending_balance_plan = moves.to_vec();
+        self.balancing_resume_status = Some(self.play_resume_status());
+        self.status = TournamentStatus::Balancing;
+        Ok(())
+    }
+
+    pub fn apply_balance_plan(
+        &mut self,
+        moves: &[TournamentSeatMove],
+    ) -> Result<(), TournamentStateError> {
+        self.publish_balance_plan(moves)?;
+        self.apply_published_balance_plan()
+    }
+
+    pub fn apply_published_balance_plan(&mut self) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Balancing],
+            "apply balance plan",
+        )?;
+        let moves = self.pending_balance_plan.clone();
+        let moved_entrants = moves.iter().map(|movement| movement.entrant_id).collect();
+        let occupancy = self.occupied_seats_without(&moved_entrants);
+        for movement in &moves {
+            if occupancy.contains(&(
+                movement.destination.table_id,
+                movement.destination.seat_index,
+            )) {
+                return Err(TournamentStateError::SeatOccupied {
+                    table_id: movement.destination.table_id,
+                    seat_index: movement.destination.seat_index,
+                });
+            }
+        }
+
+        for movement in &moves {
             let entrant = self
                 .entrants
                 .get_mut(&movement.entrant_id)
                 .ok_or(TournamentStateError::UnknownEntrant(movement.entrant_id))?;
             entrant.assignment = Some(movement.destination);
         }
+
+        self.pending_balance_plan.clear();
+        self.status = self
+            .balancing_resume_status
+            .take()
+            .unwrap_or(TournamentStatus::Running);
         Ok(())
     }
 
-    /// Records one elimination in finish-order sequence.
     pub fn record_elimination(
         &mut self,
         entrant_id: TournamentEntrantId,
+        table_id: TournamentTableId,
+        hand_number: u64,
+        tied_at_boundary: bool,
     ) -> Result<(), TournamentStateError> {
+        require_between_hands(self.boundary, "record elimination")?;
         let place = self.active_entrant_ids().len();
         let entrant = self
             .entrants
@@ -344,24 +806,22 @@ impl TournamentState {
         if !entrant.is_active() {
             return Err(TournamentStateError::EntrantNotActive(entrant_id));
         }
-        entrant.status = TournamentEntrantStatus::Eliminated { place };
+        entrant.status = TournamentEntrantStatus::Eliminated(TournamentElimination::new(
+            place,
+            table_id,
+            hand_number,
+            tied_at_boundary,
+        ));
         entrant.assignment = None;
         self.elimination_order.push(entrant_id);
         Ok(())
     }
 
-    /// Collapses remaining active entrants into one final table.
-    ///
-    /// Args:
-    ///   final_table: The destination final table definition.
-    ///
-    /// Returns:
-    ///   Ok when every active entrant is reseated on the new final table.
     pub fn collapse_to_final_table(
         &mut self,
         final_table: TournamentTable,
     ) -> Result<(), TournamentStateError> {
-        require_between_hands(self.boundary)?;
+        require_between_hands(self.boundary, "collapse to final table")?;
         let active_ids = self.active_entrant_ids_in_seat_order()?;
         if active_ids.len() > final_table.seat_count {
             return Err(TournamentStateError::FinalTableTooSmall {
@@ -371,6 +831,9 @@ impl TournamentState {
         }
 
         self.tables = vec![final_table];
+        self.pending_balance_plan.clear();
+        self.balancing_resume_status = None;
+        self.status = TournamentStatus::FinalTable;
         for (seat_index, entrant_id) in active_ids.into_iter().enumerate() {
             let entrant = self
                 .entrants
@@ -379,6 +842,31 @@ impl TournamentState {
             entrant.assignment = Some(TableSeatAssignment::new(final_table.table_id, seat_index));
         }
         Ok(())
+    }
+
+    pub fn complete_event(&mut self) -> Result<(), TournamentStateError> {
+        require_between_hands(self.boundary, "complete tournament")?;
+        if self.active_count() > 1 {
+            return Err(TournamentStateError::IncompleteFinishOrder);
+        }
+        self.registration_open = false;
+        self.pending_level_index = None;
+        self.pending_pause_reason = None;
+        self.pause_state = None;
+        self.pending_balance_plan.clear();
+        self.balancing_resume_status = None;
+        self.status = TournamentStatus::Completed;
+        Ok(())
+    }
+
+    pub fn cancel_event(&mut self) {
+        self.registration_open = false;
+        self.pending_level_index = None;
+        self.pending_pause_reason = None;
+        self.pause_state = None;
+        self.pending_balance_plan.clear();
+        self.balancing_resume_status = None;
+        self.status = TournamentStatus::Cancelled;
     }
 
     /// Resolves payout utilities from recorded finish order.
@@ -400,8 +888,26 @@ impl TournamentState {
         Ok(payouts)
     }
 
+    fn request_pause(&mut self, reason: TournamentPauseReason) -> Result<(), TournamentStateError> {
+        require_status(
+            self.status,
+            &[TournamentStatus::Running, TournamentStatus::FinalTable],
+            "pause tournament",
+        )?;
+        if self.boundary == TournamentBoundary::HandInProgress {
+            self.pending_pause_reason = Some(reason);
+            return Ok(());
+        }
+        self.pause_state = Some(TournamentPauseState {
+            reason,
+            resume_status: self.play_resume_status(),
+        });
+        self.status = TournamentStatus::OnBreak;
+        Ok(())
+    }
+
     fn finish_order(&self) -> Result<Vec<TournamentEntrantId>, TournamentStateError> {
-        if self.status != TournamentStatus::Complete {
+        if self.status != TournamentStatus::Completed {
             return Err(TournamentStateError::TournamentNotComplete);
         }
 
@@ -423,14 +929,22 @@ impl TournamentState {
         Ok(finish_order)
     }
 
-    fn active_entrant_ids(&self) -> Vec<TournamentEntrantId> {
-        let mut ids = Vec::new();
-        for entrant in self.entrants.values() {
-            if entrant.is_active() {
-                ids.push(entrant.entrant_id);
-            }
+    fn play_resume_status(&self) -> TournamentStatus {
+        match self.status {
+            TournamentStatus::FinalTable => TournamentStatus::FinalTable,
+            TournamentStatus::Balancing => self
+                .balancing_resume_status
+                .unwrap_or(TournamentStatus::Running),
+            _ => TournamentStatus::Running,
         }
-        ids
+    }
+
+    fn active_entrant_ids(&self) -> Vec<TournamentEntrantId> {
+        self.entrants
+            .values()
+            .filter(|entrant| entrant.is_active())
+            .map(|entrant| entrant.entrant_id)
+            .collect()
     }
 
     fn active_entrant_ids_in_seat_order(
@@ -475,11 +989,41 @@ impl TournamentState {
         }
         occupied
     }
+
+    fn registered_count(&self) -> usize {
+        self.entrants
+            .values()
+            .filter(|entrant| entrant.is_registered())
+            .count()
+    }
+
+    fn active_count(&self) -> usize {
+        self.entrants
+            .values()
+            .filter(|entrant| entrant.is_active())
+            .count()
+    }
+
+    fn eliminated_count(&self) -> usize {
+        self.entrants.len() - self.registered_count() - self.active_count()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TournamentSeatMoveKind {
+    RegisteredEntrant,
+    ActiveEntrant,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TournamentStateError {
     EmptyBlindSchedule,
+    InvalidEntrantCapacity {
+        max_entrants: usize,
+    },
+    InvalidStartingStack {
+        starting_stack: Chips,
+    },
     InvalidLevelIndex {
         level_index: usize,
         schedule_len: usize,
@@ -487,6 +1031,21 @@ pub enum TournamentStateError {
     InvalidTableSize {
         table_id: TournamentTableId,
         seat_count: usize,
+    },
+    InvalidStatus {
+        action: &'static str,
+        status: TournamentStatus,
+    },
+    RegistrationClosed,
+    RegistrationFull {
+        max_entrants: usize,
+    },
+    NotEnoughEntrantsToStart {
+        registered: usize,
+    },
+    StartAssignmentsIncomplete {
+        expected: usize,
+        actual: usize,
     },
     DuplicateEntrant(TournamentEntrantId),
     UnknownEntrant(TournamentEntrantId),
@@ -500,9 +1059,13 @@ pub enum TournamentStateError {
         seat_index: usize,
     },
     MissingActiveAssignment(TournamentEntrantId),
+    RegisteredEntrantAssigned(TournamentEntrantId),
     EliminatedEntrantAssigned(TournamentEntrantId),
-    RequiresBetweenHands,
+    RequiresBetweenHands {
+        action: &'static str,
+    },
     EntrantNotActive(TournamentEntrantId),
+    EntrantNotRegistered(TournamentEntrantId),
     SeatOccupied {
         table_id: TournamentTableId,
         seat_index: usize,
@@ -524,6 +1087,16 @@ impl std::fmt::Display for TournamentStateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyBlindSchedule => write!(f, "tournament blind schedule must not be empty"),
+            Self::InvalidEntrantCapacity { max_entrants } => write!(
+                f,
+                "tournament entrant capacity must be at least 2, got {}",
+                max_entrants
+            ),
+            Self::InvalidStartingStack { starting_stack } => write!(
+                f,
+                "tournament starting stack must be positive, got {}",
+                starting_stack
+            ),
             Self::InvalidLevelIndex {
                 level_index,
                 schedule_len,
@@ -539,6 +1112,25 @@ impl std::fmt::Display for TournamentStateError {
                 f,
                 "table {:?} has invalid seat count {} (expected 2-10)",
                 table_id, seat_count
+            ),
+            Self::InvalidStatus { action, status } => {
+                write!(f, "cannot {} while tournament is {:?}", action, status)
+            }
+            Self::RegistrationClosed => write!(f, "tournament registration is closed"),
+            Self::RegistrationFull { max_entrants } => write!(
+                f,
+                "tournament registration is full at {} entrants",
+                max_entrants
+            ),
+            Self::NotEnoughEntrantsToStart { registered } => write!(
+                f,
+                "tournament needs at least 2 registered entrants, got {}",
+                registered
+            ),
+            Self::StartAssignmentsIncomplete { expected, actual } => write!(
+                f,
+                "tournament start needs {} seat assignments but received {}",
+                expected, actual
             ),
             Self::DuplicateEntrant(entrant_id) => {
                 write!(f, "duplicate tournament entrant {:?}", entrant_id)
@@ -564,17 +1156,27 @@ impl std::fmt::Display for TournamentStateError {
                 "active entrant {:?} must have a current table assignment",
                 entrant_id
             ),
+            Self::RegisteredEntrantAssigned(entrant_id) => write!(
+                f,
+                "registered entrant {:?} must not keep a live seat assignment",
+                entrant_id
+            ),
             Self::EliminatedEntrantAssigned(entrant_id) => write!(
                 f,
                 "eliminated entrant {:?} must not keep a live seat assignment",
                 entrant_id
             ),
-            Self::RequiresBetweenHands => {
-                write!(f, "tournament balancing is only allowed between hands")
+            Self::RequiresBetweenHands { action } => {
+                write!(f, "{} is only allowed between hands", action)
             }
             Self::EntrantNotActive(entrant_id) => write!(
                 f,
                 "entrant {:?} is not currently active in the tournament",
+                entrant_id
+            ),
+            Self::EntrantNotRegistered(entrant_id) => write!(
+                f,
+                "entrant {:?} is not currently waiting for seat activation",
                 entrant_id
             ),
             Self::SeatOccupied {
@@ -624,6 +1226,16 @@ fn validate_tournament_state(
     if definition.blind_schedule.is_empty() {
         return Err(TournamentStateError::EmptyBlindSchedule);
     }
+    if definition.registration.max_entrants < 2 {
+        return Err(TournamentStateError::InvalidEntrantCapacity {
+            max_entrants: definition.registration.max_entrants,
+        });
+    }
+    if definition.registration.starting_stack <= 0 {
+        return Err(TournamentStateError::InvalidStartingStack {
+            starting_stack: definition.registration.starting_stack,
+        });
+    }
 
     let mut table_sizes = BTreeMap::new();
     for table in tables {
@@ -640,6 +1252,12 @@ fn validate_tournament_state(
             return Err(TournamentStateError::DuplicateEntrant(entrant.entrant_id));
         }
         match (entrant.status, entrant.assignment) {
+            (TournamentEntrantStatus::Registered, Some(_)) => {
+                return Err(TournamentStateError::RegisteredEntrantAssigned(
+                    entrant.entrant_id,
+                ));
+            }
+            (TournamentEntrantStatus::Registered, None) => {}
             (TournamentEntrantStatus::Active, Some(assignment)) => {
                 validate_assignment_against_sizes(&table_sizes, assignment)?;
                 if !occupants.insert((assignment.table_id, assignment.seat_index)) {
@@ -654,12 +1272,12 @@ fn validate_tournament_state(
                     entrant.entrant_id,
                 ));
             }
-            (TournamentEntrantStatus::Eliminated { .. }, Some(_)) => {
+            (TournamentEntrantStatus::Eliminated(_), Some(_)) => {
                 return Err(TournamentStateError::EliminatedEntrantAssigned(
                     entrant.entrant_id,
                 ));
             }
-            (TournamentEntrantStatus::Eliminated { .. }, None) => {}
+            (TournamentEntrantStatus::Eliminated(_), None) => {}
         }
     }
 
@@ -670,6 +1288,19 @@ fn validate_tournament_state(
     }
 
     Ok(entrant_map)
+}
+
+fn validate_level_index(
+    blind_schedule: &[TournamentBlindLevel],
+    level_index: usize,
+) -> Result<(), TournamentStateError> {
+    if level_index >= blind_schedule.len() {
+        return Err(TournamentStateError::InvalidLevelIndex {
+            level_index,
+            schedule_len: blind_schedule.len(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_assignment(
@@ -700,34 +1331,98 @@ fn validate_assignment_against_sizes(
     Ok(())
 }
 
-fn require_between_hands(boundary: TournamentBoundary) -> Result<(), TournamentStateError> {
-    if boundary != TournamentBoundary::BetweenHands {
-        return Err(TournamentStateError::RequiresBetweenHands);
+fn validate_seat_moves(
+    tables: &[TournamentTable],
+    entrants: &BTreeMap<TournamentEntrantId, TournamentEntrant>,
+    moves: &[TournamentSeatMove],
+    kind: TournamentSeatMoveKind,
+) -> Result<(), TournamentStateError> {
+    let mut moved_entrants = BTreeSet::new();
+    let mut destinations = BTreeSet::new();
+    for movement in moves {
+        if !moved_entrants.insert(movement.entrant_id) {
+            return Err(TournamentStateError::DuplicateMoveEntrant(
+                movement.entrant_id,
+            ));
+        }
+        if !destinations.insert((
+            movement.destination.table_id,
+            movement.destination.seat_index,
+        )) {
+            return Err(TournamentStateError::DuplicateMoveDestination {
+                table_id: movement.destination.table_id,
+                seat_index: movement.destination.seat_index,
+            });
+        }
+        validate_assignment(tables, movement.destination)?;
+        let entrant = entrants
+            .get(&movement.entrant_id)
+            .ok_or(TournamentStateError::UnknownEntrant(movement.entrant_id))?;
+        match kind {
+            TournamentSeatMoveKind::RegisteredEntrant if !entrant.is_registered() => {
+                return Err(TournamentStateError::EntrantNotRegistered(
+                    movement.entrant_id,
+                ));
+            }
+            TournamentSeatMoveKind::ActiveEntrant if !entrant.is_active() => {
+                return Err(TournamentStateError::EntrantNotActive(movement.entrant_id));
+            }
+            _ => {}
+        }
     }
     Ok(())
+}
+
+fn require_between_hands(
+    boundary: TournamentBoundary,
+    action: &'static str,
+) -> Result<(), TournamentStateError> {
+    if boundary != TournamentBoundary::BetweenHands {
+        return Err(TournamentStateError::RequiresBetweenHands { action });
+    }
+    Ok(())
+}
+
+fn require_status(
+    status: TournamentStatus,
+    allowed: &[TournamentStatus],
+    action: &'static str,
+) -> Result<(), TournamentStateError> {
+    if allowed.contains(&status) {
+        Ok(())
+    } else {
+        Err(TournamentStateError::InvalidStatus { action, status })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         TableSeatAssignment, TournamentBlindLevel, TournamentBoundary, TournamentDefinition,
-        TournamentEntrant, TournamentFormat, TournamentId, TournamentResumeMetadata,
-        TournamentSeatMove, TournamentState, TournamentStatus, TournamentTable, TournamentTableId,
+        TournamentElimination, TournamentEntrant, TournamentEntrantId, TournamentEntrantStatus,
+        TournamentFormat, TournamentId, TournamentPauseReason, TournamentRegistrationConfig,
+        TournamentResumeMetadata, TournamentSeatMove, TournamentState, TournamentStatus,
+        TournamentTable, TournamentTableId,
     };
     use crate::gameplay::TournamentPayout;
     use serde_json::json;
 
-    fn build_state() -> TournamentState {
+    fn definition() -> TournamentDefinition {
+        TournamentDefinition {
+            id: TournamentId::new(7),
+            format: TournamentFormat::Freezeout,
+            registration: TournamentRegistrationConfig::freezeout(6, 1_500).unwrap(),
+            blind_schedule: vec![
+                TournamentBlindLevel::new(25, 50, 0),
+                TournamentBlindLevel::new(50, 100, 10),
+            ],
+            payout: TournamentPayout::new(vec![0.5, 0.3, 0.2]).unwrap(),
+        }
+    }
+
+    fn build_running_state() -> TournamentState {
         TournamentState::new(
-            TournamentDefinition {
-                id: TournamentId::new(7),
-                format: TournamentFormat::Freezeout,
-                blind_schedule: vec![
-                    TournamentBlindLevel::new(25, 50, 0),
-                    TournamentBlindLevel::new(50, 100, 10),
-                ],
-                payout: TournamentPayout::new(vec![0.5, 0.3, 0.2]).unwrap(),
-            },
+            definition(),
             vec![TournamentTable::new(TournamentTableId::new(1), 3).unwrap()],
             vec![TournamentEntrant::active(
                 11,
@@ -740,15 +1435,78 @@ mod tests {
         .unwrap()
     }
 
+    fn build_announced_state() -> TournamentState {
+        TournamentState::announced(
+            definition(),
+            vec![
+                TournamentTable::new(TournamentTableId::new(1), 3).unwrap(),
+                TournamentTable::new(TournamentTableId::new(2), 3).unwrap(),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn registration_flow_opens_closes_and_starts_with_visible_state() {
+        let mut state = build_announced_state();
+        state.open_registration().unwrap();
+        state
+            .register_entrant(TournamentEntrantId::new(1), "alice")
+            .unwrap();
+        state
+            .register_entrant(TournamentEntrantId::new(2), "bob")
+            .unwrap();
+        state
+            .register_entrant(TournamentEntrantId::new(3), "cara")
+            .unwrap();
+        state.close_registration().unwrap();
+        assert_eq!(state.status, TournamentStatus::Announced);
+        assert!(!state.registration_open);
+
+        state
+            .start_event(&[
+                TournamentSeatMove::new(1, TableSeatAssignment::new(TournamentTableId::new(1), 0)),
+                TournamentSeatMove::new(2, TableSeatAssignment::new(TournamentTableId::new(1), 1)),
+                TournamentSeatMove::new(3, TableSeatAssignment::new(TournamentTableId::new(2), 0)),
+            ])
+            .unwrap();
+
+        let operator = state.operator_view();
+        assert_eq!(operator.status, TournamentStatus::Running);
+        assert_eq!(operator.active_entrants, 3);
+        assert_eq!(operator.current_level_index, 0);
+        assert_eq!(operator.current_level.big_blind, 50);
+
+        let player = state.player_view(TournamentEntrantId::new(2)).unwrap();
+        assert_eq!(player.entrant.stack, 1_500);
+        assert_eq!(
+            player.entrant.assignment,
+            Some(TableSeatAssignment::new(TournamentTableId::new(1), 1))
+        );
+        assert_eq!(player.current_level.unwrap().big_blind, 50);
+    }
+
+    #[test]
+    fn blind_level_changes_only_after_current_hand_finishes() {
+        let mut state = build_running_state();
+        state.start_hand().unwrap();
+        state.request_level_advance(1).unwrap();
+
+        assert_eq!(state.current_level_index, 0);
+        assert_eq!(state.pending_level_index, Some(1));
+
+        state.finish_hand().unwrap();
+
+        assert_eq!(state.boundary, TournamentBoundary::BetweenHands);
+        assert_eq!(state.current_level_index, 1);
+        assert_eq!(state.current_level().big_blind, 100);
+        assert_eq!(state.pending_level_index, None);
+    }
+
     #[test]
     fn entrants_persist_across_table_reassignment() {
         let mut state = TournamentState::new(
-            TournamentDefinition {
-                id: TournamentId::new(77),
-                format: TournamentFormat::Freezeout,
-                blind_schedule: vec![TournamentBlindLevel::new(50, 100, 10)],
-                payout: TournamentPayout::new(vec![0.5, 0.3, 0.2]).unwrap(),
-            },
+            definition(),
             vec![
                 TournamentTable::new(TournamentTableId::new(1), 3).unwrap(),
                 TournamentTable::new(TournamentTableId::new(2), 3).unwrap(),
@@ -762,13 +1520,24 @@ mod tests {
         .unwrap();
 
         state
-            .apply_balance_plan(&[TournamentSeatMove::new(
+            .publish_balance_plan(&[TournamentSeatMove::new(
                 3,
                 TableSeatAssignment::new(TournamentTableId::new(1), 2),
             )])
             .unwrap();
+        assert_eq!(state.status, TournamentStatus::Balancing);
+        assert_eq!(
+            state
+                .player_view(TournamentEntrantId::new(3))
+                .unwrap()
+                .pending_assignment,
+            Some(TableSeatAssignment::new(TournamentTableId::new(1), 2))
+        );
+
+        state.apply_published_balance_plan().unwrap();
 
         let entrant = state.entrant(3).unwrap();
+        assert_eq!(state.status, TournamentStatus::Running);
         assert_eq!(entrant.stack, 900);
         assert_eq!(
             entrant.assignment.unwrap().table_id,
@@ -779,7 +1548,7 @@ mod tests {
 
     #[test]
     fn balancing_requires_between_hand_boundary() {
-        let mut state = build_state();
+        let mut state = build_running_state();
         state.boundary = TournamentBoundary::HandInProgress;
 
         let error = state
@@ -793,14 +1562,57 @@ mod tests {
     }
 
     #[test]
+    fn elimination_records_place_table_hand_and_final_payout() {
+        let mut state = TournamentState::new(
+            definition(),
+            vec![TournamentTable::new(TournamentTableId::new(1), 3).unwrap()],
+            vec![
+                TournamentEntrant::active(1, "alice", 2_100, TournamentTableId::new(1), 0),
+                TournamentEntrant::active(2, "bob", 1_400, TournamentTableId::new(1), 1),
+                TournamentEntrant::active(3, "cara", 900, TournamentTableId::new(1), 2),
+            ],
+        )
+        .unwrap();
+
+        state
+            .record_elimination(
+                TournamentEntrantId::new(3),
+                TournamentTableId::new(1),
+                5,
+                false,
+            )
+            .unwrap();
+        let eliminated = state.player_view(TournamentEntrantId::new(3)).unwrap();
+        assert_eq!(
+            eliminated.entrant.status,
+            TournamentEntrantStatus::Eliminated(TournamentElimination::new(
+                3,
+                TournamentTableId::new(1),
+                5,
+                false,
+            ))
+        );
+
+        state
+            .record_elimination(
+                TournamentEntrantId::new(2),
+                TournamentTableId::new(1),
+                8,
+                false,
+            )
+            .unwrap();
+        state.complete_event().unwrap();
+
+        let winner = state.player_view(TournamentEntrantId::new(1)).unwrap();
+        let runner_up = state.player_view(TournamentEntrantId::new(2)).unwrap();
+        assert_eq!(winner.payout, Some(0.5));
+        assert_eq!(runner_up.payout, Some(0.3));
+    }
+
+    #[test]
     fn final_table_transition_preserves_stacks_and_elimination_order() {
         let mut state = TournamentState::new(
-            TournamentDefinition {
-                id: TournamentId::new(88),
-                format: TournamentFormat::Freezeout,
-                blind_schedule: vec![TournamentBlindLevel::new(100, 200, 25)],
-                payout: TournamentPayout::new(vec![0.5, 0.3, 0.2]).unwrap(),
-            },
+            definition(),
             vec![
                 TournamentTable::new(TournamentTableId::new(1), 3).unwrap(),
                 TournamentTable::new(TournamentTableId::new(2), 3).unwrap(),
@@ -809,7 +1621,12 @@ mod tests {
                 TournamentEntrant::active(1, "alice", 2_100, TournamentTableId::new(1), 0),
                 TournamentEntrant::active(2, "bob", 1_400, TournamentTableId::new(1), 1),
                 TournamentEntrant::active(3, "cara", 900, TournamentTableId::new(2), 0),
-                TournamentEntrant::eliminated(4, "dana", 0, 4),
+                TournamentEntrant::eliminated(
+                    4,
+                    "dana",
+                    0,
+                    TournamentElimination::new(4, TournamentTableId::new(2), 3, false),
+                ),
             ],
         )
         .unwrap();
@@ -818,6 +1635,7 @@ mod tests {
             .collapse_to_final_table(TournamentTable::new(TournamentTableId::new(9), 3).unwrap())
             .unwrap();
 
+        assert_eq!(state.status, TournamentStatus::FinalTable);
         assert_eq!(state.tables.len(), 1);
         assert_eq!(state.tables[0].table_id, TournamentTableId::new(9));
         assert_eq!(state.elimination_order, vec![4.into()]);
@@ -827,47 +1645,25 @@ mod tests {
     }
 
     #[test]
-    fn payout_follows_recorded_finish_order() {
-        let mut state = TournamentState::new(
-            TournamentDefinition {
-                id: TournamentId::new(99),
-                format: TournamentFormat::Freezeout,
-                blind_schedule: vec![TournamentBlindLevel::new(100, 200, 25)],
-                payout: TournamentPayout::new(vec![0.5, 0.3, 0.2]).unwrap(),
-            },
-            vec![TournamentTable::new(TournamentTableId::new(1), 4).unwrap()],
-            vec![
-                TournamentEntrant::active(1, "alice", 3_000, TournamentTableId::new(1), 0),
-                TournamentEntrant::eliminated(2, "bob", 0, 2),
-                TournamentEntrant::eliminated(3, "cara", 0, 3),
-                TournamentEntrant::eliminated(4, "dana", 0, 4),
-            ],
-        )
-        .unwrap();
-        state.status = TournamentStatus::Complete;
-        state.elimination_order = vec![4.into(), 3.into(), 2.into()];
-
-        let payouts = state.payouts_by_finish().unwrap();
-        assert_eq!(payouts.get(&1.into()).copied(), Some(0.5));
-        assert_eq!(payouts.get(&2.into()).copied(), Some(0.3));
-        assert_eq!(payouts.get(&3.into()).copied(), Some(0.2));
-        assert_eq!(payouts.get(&4.into()).copied(), Some(0.0));
-    }
-
-    #[test]
-    fn paused_state_round_trips_metadata_and_assignments() {
-        let mut state = build_state();
-        state.status = TournamentStatus::Paused;
+    fn pause_and_resume_preserve_level_metadata_and_assignments() {
+        let mut state = build_running_state();
+        state.current_level_index = 1;
         state.resume = TournamentResumeMetadata {
             completed_hands: 12,
             next_hand_number: 13,
         };
-        state.current_level_index = 1;
+
+        state.start_break().unwrap();
+        assert_eq!(state.status, TournamentStatus::OnBreak);
+        assert_eq!(
+            state.pause_state.unwrap().reason,
+            TournamentPauseReason::ScheduledBreak
+        );
 
         let encoded = serde_json::to_value(&state).unwrap();
         let decoded: TournamentState = serde_json::from_value(encoded.clone()).unwrap();
 
-        assert_eq!(decoded.status, TournamentStatus::Paused);
+        assert_eq!(decoded.status, TournamentStatus::OnBreak);
         assert_eq!(decoded.resume.completed_hands, 12);
         assert_eq!(decoded.current_level_index, 1);
         assert_eq!(
@@ -875,5 +1671,9 @@ mod tests {
             Some(TableSeatAssignment::new(TournamentTableId::new(1), 0))
         );
         assert_eq!(encoded["definition"]["format"], json!("freezeout"));
+
+        let mut resumed = decoded;
+        resumed.resume_event().unwrap();
+        assert_eq!(resumed.status, TournamentStatus::Running);
     }
 }

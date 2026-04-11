@@ -1,10 +1,11 @@
 use crate::{Chips, Utility};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::Game;
 
 /// Tournament payout curve (utilities are normalized to sum to 1.0).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TournamentPayout {
     payouts: Vec<Utility>,
 }

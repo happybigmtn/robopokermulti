@@ -12,6 +12,7 @@ mod settlement;
 mod showdown;
 mod table;
 mod tournament;
+mod tournament_state;
 mod turn;
 
 pub use abstraction::*;
@@ -28,4 +29,5 @@ pub use settlement::*;
 pub use showdown::*;
 pub use table::*;
 pub use tournament::*;
+pub use tournament_state::*;
 pub use turn::*;
